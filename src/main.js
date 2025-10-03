@@ -1,39 +1,5 @@
 import { Actor, log } from 'apify';
-import { CheerioCrawler, Dataset } from 'crawlee';
-
-import * as cheerio from 'cheerio';
-
-// ------------------------- DESCRIPTION CLEANER -------------------------
-function cleanDescription(rawHtml) {
-    if (!rawHtml) return { html: '', text: '' };
-    const $ = cheerio.load(rawHtml);
-
-    // Remove <a> completely with their text
-    $('a').remove();
-
-    // Remove unwanted tags
-    $('script, style, noscript, iframe, button').remove();
-
-    // Only keep allowed tags
-    const allowedTags = new Set(['p', 'ul', 'ol', 'li', 'strong', 'em', 'br']);
-    $('*').each((_, el) => {
-        const tag = el.tagName ? el.tagName.toLowerCase() : '';
-        if (tag && !allowedTags.has(tag)) {
-            $(el).replaceWith($(el).text());
-        }
-    });
-
-    const cleanedHtml = $('body').html() || '';
-    const cleanedText = $('body').text()
-        .replace(/\u00a0/g, ' ')
-        .replace(/\s*\n\s*/g, '\n')
-        .replace(/[ \t]{2,}/g, ' ')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
-
-    return { html: cleanedHtml.trim(), text: cleanedText };
-}
-
+import { CheerioCrawler, Dataset, cheerio } from 'crawlee';
 
 // ------------------------- INITIALIZATION -------------------------
 await Actor.init();
@@ -116,6 +82,44 @@ const normalizeCookieHeader = ({ cookies: rawCookies, cookiesJson: jsonCookies }
         }
     }
     return '';
+};
+
+// Convert HTML to formatted plain text
+const htmlToText = (html) => {
+    if (!html) return '';
+
+    const $ = cheerio.load(html);
+
+    // Replace <br> with newlines
+    $('br').replaceWith('\n');
+
+    // Add newlines after block elements for better spacing
+    $('p, h1, h2, h3, h4, h5, h6, ul, ol, div, blockquote').after('\n');
+
+    // Handle list items
+    $('li').each((_, el) => {
+        $(el).prepend('* ');
+    });
+
+    // Get text, which now includes the newlines we added
+    const text = $.text();
+
+    // Clean up extra whitespace and newlines
+    return text
+        .replace(/(\n\s*){3,}/g, '\n\n') // Collapse 3+ newlines to 2
+        .trim();
+};
+
+// Clean the description HTML to keep only the main content
+const cleanDescriptionHtml = (html) => {
+    if (!html) return '';
+
+    const $ = cheerio.load(html);
+
+    // Remove elements that are not part of the main description
+    $('.jdp-required-skills, #apply-bottom-content, #cb-tip, .site-tip').remove();
+
+    return $.html();
 };
 
 // Extract JSON-LD structured data from page
@@ -390,7 +394,8 @@ const crawler = new CheerioCrawler({
                         date_posted: job.datePosted || 'Not specified',
                         salary: job.baseSalary?.value || job.estimatedSalary || 'Not specified',
                         job_type: job.employmentType || 'Not specified',
-                        ...(() => { const { html, text } = cleanDescription(job.description || ''); return { description_text: text, description_html: html }; })(),
+                        description_text: htmlToText(job.description),
+                        description_html: cleanDescriptionHtml(job.description),
                         url: jobUrl,
                         scraped_at: new Date().toISOString(),
                         source: 'json-ld'
@@ -483,7 +488,8 @@ const crawler = new CheerioCrawler({
                     date_posted: job.datePosted || 'Not specified',
                     salary: job.baseSalary?.value || job.estimatedSalary || 'Not specified',
                     job_type: job.employmentType || 'Not specified',
-                    ...(() => { const { html, text } = cleanDescription(job.description || ''); return { description_text: text, description_html: html }; })(),
+                    description_text: htmlToText(job.description),
+                    description_html: cleanDescriptionHtml(job.description),
                     url: request.url,
                     scraped_at: new Date().toISOString(),
                     source: 'json-ld-detail'
@@ -518,8 +524,10 @@ const crawler = new CheerioCrawler({
                               $('[class*="posted"]').first().text().trim() ||
                               'Not specified';
 
-            const rawDescription = $('[class*="description"]').first().html() || '';
-            const { html: description, text: descriptionText } = cleanDescription(rawDescription);
+            // Use a more specific selector for the description container
+            const descriptionContainer = $('.jdp-left-content').first();
+            const descriptionHtml = descriptionContainer.length ? cleanDescriptionHtml(descriptionContainer.html()) : '';
+            const descriptionText = descriptionContainer.length ? htmlToText(descriptionContainer.html()) : '';
 
             const jobData = {
                 title,
@@ -528,7 +536,7 @@ const crawler = new CheerioCrawler({
                 date_posted: datePosted,
                 salary: 'Not specified',
                 job_type: 'Not specified',
-                description_html: description,
+                description_html: descriptionHtml,
                 description_text: descriptionText,
                 url: request.url,
                 scraped_at: new Date().toISOString(),
