@@ -1,5 +1,6 @@
 import { Actor, log } from 'apify';
-import { CheerioCrawler, Dataset, cheerio } from 'crawlee';
+import { CheerioCrawler, Dataset } from 'crawlee';
+import cheerio from 'cheerio'; // Correct import for cheerio
 
 // ------------------------- INITIALIZATION -------------------------
 await Actor.init();
