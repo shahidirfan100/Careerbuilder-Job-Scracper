@@ -1,72 +1,87 @@
 {
   "title": "CareerBuilder Jobs Scraper",
-  "description": "Scrape jobs from CareerBuilder.com listings. Provide keyword/location or a CareerBuilder search URL. Actor paginates and scrapes detail pages.",
+  "description": "Scrape jobs from CareerBuilder.com. Use either a direct CareerBuilder URL OR provide keyword/location. Supports pagination and extracts job details using JSON-LD structured data.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
     "startUrl": {
-      "title": "Start URL",
+      "title": "Start URL (Option 1)",
       "type": "string",
-      "description": "Start scraping from a specific CareerBuilder.com search URL. If provided, this will be used instead of Keyword/Location.",
-      "editor": "textfield"
+      "description": "Direct CareerBuilder search URL. Example: https://www.careerbuilder.com/jobs-accounting-and-auditing-near-me?posted=1&radius=50&cb_apply=false. If provided, keyword/location will be ignored.",
+      "editor": "textfield",
+      "example": "https://www.careerbuilder.com/jobs-accounting-and-auditing-near-me?posted=1&radius=50&cb_apply=false&keywords=&location=&pay=&emp=&cb_veterans=false&cb_workhome=all"
     },
     "keyword": {
-      "title": "Keyword (if not using Start URL)",
+      "title": "Keyword (Option 2)",
       "type": "string",
-      "description": "Job search keyword(s), e.g., 'Software Developer'.",
-      "editor": "textfield"
+      "description": "Job search keyword(s). Examples: 'Software Developer', 'Accountant', 'Marketing Manager'. Only used if Start URL is not provided.",
+      "editor": "textfield",
+      "example": "Software Developer"
     },
     "location": {
-      "title": "Location (if not using Start URL)",
+      "title": "Location (Option 2)",
       "type": "string",
-      "description": "Geographic location to search in, e.g., 'New York, NY'.",
-      "editor": "textfield"
+      "description": "Geographic location. Examples: 'New York, NY', 'San Francisco, CA', 'Remote'. Only used if Start URL is not provided.",
+      "editor": "textfield",
+      "example": "New York, NY"
     },
     "posted_date": {
-      "title": "Posted Date (if not using Start URL)",
+      "title": "Posted Date Filter",
       "type": "string",
-      "description": "Filter jobs by how recently they were posted.",
+      "description": "Filter jobs by posting date. Note: Only applies when using keyword/location, not when using Start URL.",
       "enum": [
         "anytime",
         "24h",
         "7d",
         "30d"
       ],
-      "prefill": "anytime",
+      "default": "anytime",
+      "enumTitles": [
+        "Any time",
+        "Last 24 hours",
+        "Last 7 days",
+        "Last 30 days"
+      ],
       "editor": "select"
     },
     "results_wanted": {
-      "title": "Maximum number of jobs",
+      "title": "Maximum Results",
       "type": "integer",
-      "description": "The maximum number of jobs to collect. The scraper will stop when this limit is reached.",
+      "description": "Maximum number of jobs to scrape. Scraper stops when this limit is reached.",
       "minimum": 1,
       "default": 100,
-      "editor": "number"
+      "editor": "number",
+      "example": 100
     },
     "max_pages": {
-      "title": "Maximum number of pages",
+      "title": "Maximum Pages",
       "type": "integer",
-      "description": "A safety cap on the number of search result pages to visit.",
+      "description": "Maximum number of search result pages to visit. Safety limit to prevent excessive crawling.",
       "minimum": 1,
-      "editor": "number",
-      "default": 20
+      "maximum": 100,
+      "default": 20,
+      "editor": "number"
     },
     "proxyConfiguration": {
-      "title": "Proxy configuration",
+      "title": "Proxy Configuration",
       "type": "object",
-      "description": "Use Apify Proxy for the best results.",
-      "editor": "proxy"
+      "description": "HIGHLY RECOMMENDED: Use Apify Proxy to avoid blocking. Without proxy, you will likely get blocked by CareerBuilder.",
+      "editor": "proxy",
+      "prefill": {
+        "useApifyProxy": true
+      }
     },
     "cookies": {
-      "title": "Custom cookies (raw header)",
+      "title": "Custom Cookies (Raw)",
       "type": "string",
-      "description": "Optional raw 'Cookie' header string. Can help bypass consent banners.",
-      "editor": "textfield"
+      "description": "Optional: Raw Cookie header string to bypass consent banners or improve success rate. Format: 'cookie1=value1; cookie2=value2'",
+      "editor": "textfield",
+      "sectionCaption": "Advanced Options (Optional)"
     },
     "cookiesJson": {
-      "title": "Custom cookies (JSON)",
+      "title": "Custom Cookies (JSON)",
       "type": "string",
-      "description": "Optional JSON-formatted cookies. Accepts an array (e.g., [{\"name\":\"a\",\"value\":\"1\"}]) or an object map (e.g., {\"a\":\"1\"}).",
+      "description": "Optional: JSON-formatted cookies. Accepts array format: [{\"name\":\"cookie1\",\"value\":\"value1\"}] or object format: {\"cookie1\":\"value1\"}",
       "editor": "textarea"
     }
   },

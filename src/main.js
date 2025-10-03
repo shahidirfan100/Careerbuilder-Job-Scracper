@@ -24,17 +24,40 @@ const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) 
 // ------------------------- HELPERS -------------------------
 const buildStartUrl = (kw, loc, date) => {
     const url = new URL('https://www.careerbuilder.com/jobs');
+    
+    // Add keywords and location if provided
     if (kw) url.searchParams.set('keywords', kw);
     if (loc) url.searchParams.set('location', loc);
     
+    // Add date filter
     if (date && date !== 'anytime') {
         const dateMap = { '24h': '1', '7d': '7', '30d': '30' };
         if (dateMap[date]) url.searchParams.set('posted', dateMap[date]);
     }
     
+    // Add standard parameters
     url.searchParams.set('cb_apply', 'false');
     url.searchParams.set('radius', '50');
+    url.searchParams.set('cb_veterans', 'false');
+    url.searchParams.set('cb_workhome', 'all');
+    
     return url.href;
+};
+
+// Parse and validate the start URL
+const normalizeStartUrl = (urlString) => {
+    try {
+        const url = new URL(urlString);
+        // Ensure it's a CareerBuilder URL
+        if (!url.hostname.includes('careerbuilder.com')) {
+            log.warning(`URL is not from careerbuilder.com: ${url.hostname}`);
+            return null;
+        }
+        return url.href;
+    } catch (e) {
+        log.error(`Invalid URL provided: ${urlString}`);
+        return null;
+    }
 };
 
 const normalizeCookieHeader = ({ cookies: rawCookies, cookiesJson: jsonCookies }) => {
@@ -170,8 +193,26 @@ const extractJobUrls = ($, crawlerLog) => {
 
 // Find next page URL
 const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
-    // Strategy 1: Look for next button
-    let nextUrl = $('a[aria-label*="Next"], a.next, a[rel="next"]').first().attr('href');
+    // Strategy 1: Look for next button/link
+    const nextSelectors = [
+        'a[aria-label*="Next"]',
+        'a.next',
+        'a[rel="next"]',
+        'button[aria-label*="Next"]',
+        '.pagination a:contains("Next")',
+        'a.pagination-next',
+        'a[data-page="next"]'
+    ];
+    
+    let nextUrl = null;
+    for (const selector of nextSelectors) {
+        const href = $(selector).first().attr('href');
+        if (href) {
+            nextUrl = href;
+            crawlerLog.debug(`Found next page with selector: ${selector}`);
+            break;
+        }
+    }
     
     // Strategy 2: Look for page numbers
     if (!nextUrl) {
@@ -181,22 +222,37 @@ const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
             const text = $(link).text().trim();
             if (text === String(currentPage + 1)) {
                 nextUrl = href;
+                crawlerLog.debug('Found next page by page number');
                 break;
             }
         }
     }
     
-    // Strategy 3: Construct URL manually
+    // Strategy 3: Construct URL manually with page_number parameter
     if (!nextUrl) {
         try {
             const url = new URL(currentUrl);
-            const pageParam = url.searchParams.get('page_number') || url.searchParams.get('page') || '1';
-            const nextPageNum = parseInt(pageParam) + 1;
-            url.searchParams.set('page_number', String(nextPageNum));
+            const currentPageNum = parseInt(url.searchParams.get('page_number') || '1');
+            url.searchParams.set('page_number', String(currentPageNum + 1));
             nextUrl = url.href;
-            crawlerLog.info(`Constructed next page URL: page ${nextPageNum}`);
+            crawlerLog.info(`Constructed next page URL: page ${currentPageNum + 1}`);
         } catch (e) {
             crawlerLog.debug(`Failed to construct next URL: ${e.message}`);
+        }
+    }
+    
+    // Strategy 4: For URLs with path-based pagination (e.g., /page/2)
+    if (!nextUrl) {
+        try {
+            const url = new URL(currentUrl);
+            if (url.pathname.includes('/page/')) {
+                const newPath = url.pathname.replace(/\/page\/\d+/, `/page/${currentPage + 1}`);
+                url.pathname = newPath;
+                nextUrl = url.href;
+                crawlerLog.info(`Constructed next page URL from path: page ${currentPage + 1}`);
+            }
+        } catch (e) {
+            crawlerLog.debug(`Failed to construct path-based URL: ${e.message}`);
         }
     }
     
@@ -461,7 +517,25 @@ const crawler = new CheerioCrawler({
 });
 
 // ============= START SCRAPING =============
-const initialUrl = startUrl || buildStartUrl(keyword, location, posted_date);
+let initialUrl;
+
+if (startUrl) {
+    // Use provided URL
+    initialUrl = normalizeStartUrl(startUrl);
+    if (!initialUrl) {
+        log.error('Invalid startUrl provided. Please provide a valid CareerBuilder URL.');
+        await Actor.exit();
+    }
+    log.info('Using provided start URL (ignoring keyword/location parameters)');
+} else if (keyword || location) {
+    // Build URL from keyword/location
+    initialUrl = buildStartUrl(keyword, location, posted_date);
+    log.info('Building URL from keyword/location parameters');
+} else {
+    // No parameters provided - use a default search
+    log.warning('No startUrl, keyword, or location provided. Using default CareerBuilder jobs page.');
+    initialUrl = 'https://www.careerbuilder.com/jobs?cb_apply=false&radius=50&cb_veterans=false&cb_workhome=all';
+}
 
 log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 log.info('🚀 CareerBuilder Scraper Starting');
