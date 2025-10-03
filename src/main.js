@@ -85,7 +85,7 @@ const normalizeCookieHeader = ({ cookies: rawCookies, cookiesJson: jsonCookies }
     return '';
 };
 
-// ------------------------- JSON-LD EXTRACTOR -------------------------
+// Extract JSON-LD structured data from page
 const extractJsonLd = ($, crawlerLog) => {
     const jsonLdScripts = $('script[type="application/ld+json"]').toArray();
     const jobPostings = [];
@@ -126,24 +126,26 @@ const extractJsonLd = ($, crawlerLog) => {
 };
 
 // ------------------------- DESCRIPTION CLEANER -------------------------
+// Cleans a description fragment (HTML string or JSON-LD string).
+// - Removes <a> tags but KEEPS their inner text
+// - Removes non-text tags (script/style/iframe/button/etc.)
+// - Keeps only text-formatting tags in HTML output: p, ul, ol, li, strong, em, br
+// - Returns both clean HTML and clean plain text
 function cleanDescription(rawHtml) {
-    // Accepts a fragment (e.g., innerHTML of the description container) OR a string from JSON-LD
     if (rawHtml == null) return { html: '', text: '' };
-
-    // Load as fragment; DO NOT assume <body> exists
-    const $ = cheerio.load(String(rawHtml));
+    const $ = cheerio.load(String(rawHtml));   // Load as fragment, not a full document
     const root = $.root();
 
-    // Unwrap <a> (remove tag, keep anchor text)
+    // Remove <a> tags but keep the anchor text
     root.find('a').each((_, el) => {
         const $el = $(el);
         $el.replaceWith($el.text());
     });
 
-    // Remove non-text/interactive tags that sometimes leak in
+    // Remove clearly non-text tags
     root.find('script, style, noscript, iframe, button').remove();
 
-    // Keep only text-related formatting tags; unwrap everything else into text
+    // Keep only text-related tags, unwrap the rest to their text
     const allowed = new Set(['p', 'ul', 'ol', 'li', 'strong', 'em', 'br']);
     root.find('*').each((_, el) => {
         const tag = el.tagName ? el.tagName.toLowerCase() : '';
@@ -153,18 +155,15 @@ function cleanDescription(rawHtml) {
         }
     });
 
-    // HTML result (fragment)
-    const html = root.html() || '';
-
-    // Text result (normalized)
+    const html = (root.html() || '').trim();
     const text = root.text()
         .replace(/\u00a0/g, ' ')     // nbsp -> space
         .replace(/\s*\n\s*/g, '\n')  // tidy newlines
-        .replace(/[ \t]{2,}/g, ' ')  // collapse spaces
-        .replace(/\n{3,}/g, '\n\n')  // limit blank lines
+        .replace(/[ \t]{2,}/g, ' ')  // collapse multiple spaces
+        .replace(/\n{3,}/g, '\n\n')  // limit excessive blank lines
         .trim();
 
-    return { html: html.trim(), text };
+    return { html, text };
 }
 
 // ------------------------- PROXY & CRAWLER -------------------------
@@ -208,6 +207,8 @@ const crawler = new CheerioCrawler({
                 'Sec-Fetch-User': '?1',
                 'Upgrade-Insecure-Requests': '1',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                // Harmless hint that often helps initial page:
+                'Referer': 'https://www.careerbuilder.com/',
             };
             
             const cookieHeader = normalizeCookieHeader({ cookies, cookiesJson });
@@ -254,10 +255,9 @@ const crawler = new CheerioCrawler({
                     if (!jobUrl || scrapedUrls.has(jobUrl)) continue;
                     
                     scrapedUrls.add(jobUrl);
-
-                    // CLEAN description coming from JSON-LD string
-                    const { html: descHtml, text: descText } = cleanDescription(job.description || '');
-
+                    
+                    // CLEANED description from JSON-LD string
+                    const { html: cleanedHtml, text: cleanedText } = cleanDescription(job.description || '');
                     const jobData = {
                         title: job.title || job.name || 'Not specified',
                         company: job.hiringOrganization?.name || 'Not specified',
@@ -267,8 +267,8 @@ const crawler = new CheerioCrawler({
                         date_posted: job.datePosted || 'Not specified',
                         salary: job.baseSalary?.value || job.estimatedSalary || 'Not specified',
                         job_type: job.employmentType || 'Not specified',
-                        description_html: descHtml,
-                        description_text: descText,
+                        description_text: cleanedText,
+                        description_html: cleanedHtml,
                         url: jobUrl,
                         scraped_at: new Date().toISOString(),
                         source: 'json-ld'
@@ -351,10 +351,8 @@ const crawler = new CheerioCrawler({
             const jsonLdJobs = extractJsonLd($, crawlerLog);
             if (jsonLdJobs.length > 0) {
                 const job = jsonLdJobs[0];
-
-                // CLEAN description from JSON-LD
-                const { html: descHtml, text: descText } = cleanDescription(job.description || '');
-
+                
+                const { html: cleanedHtml, text: cleanedText } = cleanDescription(job.description || '');
                 const jobData = {
                     title: job.title || job.name || 'Not specified',
                     company: job.hiringOrganization?.name || 'Not specified',
@@ -364,8 +362,8 @@ const crawler = new CheerioCrawler({
                     date_posted: job.datePosted || 'Not specified',
                     salary: job.baseSalary?.value || job.estimatedSalary || 'Not specified',
                     job_type: job.employmentType || 'Not specified',
-                    description_html: descHtml,
-                    description_text: descText,
+                    description_text: cleanedText,
+                    description_html: cleanedHtml,
                     url: request.url,
                     scraped_at: new Date().toISOString(),
                     source: 'json-ld-detail'
@@ -400,9 +398,7 @@ const crawler = new CheerioCrawler({
                               $('[class*="posted"]').first().text().trim() ||
                               'Not specified';
 
-            // Your original selector for description (kept), just cleaned below
             const rawDescription = $('[class*="description"]').first().html() || '';
-
             const { html: description, text: descriptionText } = cleanDescription(rawDescription);
 
             const jobData = {
@@ -431,6 +427,141 @@ const crawler = new CheerioCrawler({
         log.error(`Error: ${error.message}`);
     },
 });
+
+// Extract job URLs from listing page
+const extractJobUrls = ($, crawlerLog) => {
+    const urls = new Set();
+    
+    // Try multiple approaches to find job links
+    const strategies = [
+        // Strategy 1: Direct job links
+        () => {
+            $('a[href*="/job/"]').each((_, el) => {
+                const href = $(el).attr('href');
+                if (href && href.includes('/job/') && !href.includes('?') && href.length > 20) {
+                    urls.add(href);
+                }
+            });
+        },
+        // Strategy 2: Data attributes
+        () => {
+            $('[data-job-did], [data-job-id]').each((_, el) => {
+                const href = $(el).find('a').first().attr('href') || $(el).attr('href');
+                if (href && href.includes('/job/')) {
+                    urls.add(href);
+                }
+            });
+        },
+        // Strategy 3: Job card containers
+        () => {
+            $('div[class*="job"], article[class*="job"], li[class*="job"]').each((_, el) => {
+                const href = $(el).find('a[href*="/job/"]').first().attr('href');
+                if (href) {
+                    urls.add(href);
+                }
+            });
+        },
+        // Strategy 4: Search for job IDs in onclick or data attributes
+        () => {
+            $('[onclick*="job"], [data-gtm*="job"]').each((_, el) => {
+                const href = $(el).attr('href') || $(el).find('a').first().attr('href');
+                if (href && href.includes('/job/')) {
+                    urls.add(href);
+                }
+            });
+        }
+    ];
+    
+    for (const strategy of strategies) {
+        try {
+            strategy();
+            if (urls.size > 0) break; // Use first successful strategy
+        } catch (e) {
+            crawlerLog.debug(`Strategy failed: ${e.message}`);
+        }
+    }
+    
+    // Convert relative URLs to absolute
+    const absoluteUrls = [];
+    for (const url of urls) {
+        try {
+            const absolute = new URL(url, 'https://www.careerbuilder.com').href;
+            absoluteUrls.push(absolute);
+        } catch (e) {
+            crawlerLog.debug(`Invalid URL: ${url}`);
+        }
+    }
+    
+    return absoluteUrls;
+};
+
+// Find next page URL
+const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
+    // Strategy 1: Look for next button/link
+    const nextSelectors = [
+        'a[aria-label*="Next"]',
+        'a.next',
+        'a[rel="next"]',
+        'button[aria-label*="Next"]',
+        '.pagination a:contains("Next")',
+        'a.pagination-next',
+        'a[data-page="next"]'
+    ];
+    
+    let nextUrl = null;
+    for (const selector of nextSelectors) {
+        const href = $(selector).first().attr('href');
+        if (href) {
+            nextUrl = href;
+            crawlerLog.debug(`Found next page with selector: ${selector}`);
+            break;
+        }
+    }
+    
+    // Strategy 2: Look for page numbers
+    if (!nextUrl) {
+        const pageLinks = $('a[href*="page"]').toArray();
+        for (const link of pageLinks) {
+            const href = $(link).attr('href');
+            const text = $(link).text().trim();
+            if (text === String(currentPage + 1)) {
+                nextUrl = href;
+                crawlerLog.debug('Found next page by page number');
+                break;
+            }
+        }
+    }
+    
+    // Strategy 3: Construct URL manually with page_number parameter
+    if (!nextUrl) {
+        try {
+            const url = new URL(currentUrl);
+            const currentPageNum = parseInt(url.searchParams.get('page_number') || '1');
+            url.searchParams.set('page_number', String(currentPageNum + 1));
+            nextUrl = url.href;
+            crawlerLog.info(`Constructed next page URL: page ${currentPageNum + 1}`);
+        } catch (e) {
+            crawlerLog.debug(`Failed to construct next URL: ${e.message}`);
+        }
+    }
+    
+    // Strategy 4: For URLs with path-based pagination (e.g., /page/2)
+    if (!nextUrl) {
+        try {
+            const url = new URL(currentUrl);
+            if (url.pathname.includes('/page/')) {
+                const newPath = url.pathname.replace(/\/page\/\d+/, `/page/${currentPage + 1}`);
+                url.pathname = newPath;
+                nextUrl = url.href;
+                crawlerLog.info(`Constructed next page URL from path: page ${currentPage + 1}`);
+            }
+        } catch (e) {
+            crawlerLog.debug(`Failed to construct path-based URL: ${e.message}`);
+        }
+    }
+    
+    return nextUrl ? new URL(nextUrl, 'https://www.careerbuilder.com').href : null;
+};
 
 // ============= START SCRAPING =============
 let initialUrl;
