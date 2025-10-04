@@ -124,7 +124,71 @@ const extractJsonLd = ($, crawlerLog) => {
     return jobPostings;
 };
 
-// Extract job URLs from listing page
+// Clean and format description text
+const cleanDescriptionText = ($element) => {
+    // Clone the element to avoid modifying the original
+    const $clone = $element.clone();
+    
+    // Remove unwanted sections
+    $clone.find('.jdp-required-skills').remove();
+    $clone.find('#apply-bottom-content').remove();
+    $clone.find('#cb-tip').remove();
+    $clone.find('#ads-mobile-placeholder').remove();
+    $clone.find('#ads-desktop-placeholder').remove();
+    $clone.find('.report-job-link').remove();
+    $clone.find('button').remove();
+    
+    // Get text and format it properly
+    let text = $clone.text();
+    
+    // Replace multiple spaces with single space
+    text = text.replace(/\s+/g, ' ');
+    
+    // Replace multiple newlines with double newline
+    text = text.replace(/\n\s*\n\s*\n+/g, '\n\n');
+    
+    // Trim and return
+    return text.trim();
+};
+
+// Clean description HTML (keep only job description content)
+const cleanDescriptionHtml = ($element) => {
+    // Clone to avoid modifying original
+    const $clone = $element.clone();
+    
+    // Remove unwanted sections
+    $clone.find('.jdp-required-skills').remove();
+    $clone.find('#apply-bottom-content').remove();
+    $clone.find('#apply-bottom').remove();
+    $clone.find('#cb-tip').remove();
+    $clone.find('#ads-mobile-placeholder').remove();
+    $clone.find('#ads-desktop-placeholder').remove();
+    $clone.find('#col-right').remove();
+    $clone.find('.seperate-top-border-mobile').remove();
+    $clone.find('.site-tip').remove();
+    $clone.find('button').remove();
+    
+    // Remove all <a> tags but keep their text content
+    $clone.find('a').each((_, el) => {
+        const $el = $clone.constructor(el);
+        $el.replaceWith($el.text());
+    });
+    
+    // Remove script and style tags
+    $clone.find('script, style, noscript').remove();
+    
+    // Remove empty paragraphs and divs
+    $clone.find('p:empty, div:empty, br + br + br').remove();
+    
+    // Get the HTML
+    let html = $clone.html() || '';
+    
+    // Clean up excessive whitespace in HTML
+    html = html.replace(/\s+/g, ' ');
+    html = html.replace(/>\s+</g, '><');
+    
+    return html.trim();
+};
 const extractJobUrls = ($, crawlerLog) => {
     const urls = new Set();
     
@@ -259,84 +323,6 @@ const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
     return nextUrl ? new URL(nextUrl, 'https://www.careerbuilder.com').href : null;
 };
 
-// Extract clean text from job description HTML
-const extractCleanDescription = (htmlDescription) => {
-    if (!htmlDescription || typeof htmlDescription !== 'string') return '';
-    
-    try {
-        // Load HTML into cheerio for processing
-        const $ = require('cheerio').load(htmlDescription);
-        
-        // Remove unwanted sections first
-        $('.jdp-required-skills').remove(); // Remove skills section
-        $('[class*="apply"]').remove(); // Remove application sections
-        $('[class*="report"]').remove(); // Remove report job sections
-        $('.site-tip').remove(); // Remove tips
-        $('#ads-desktop-placeholder, #ads-mobile-placeholder').remove(); // Remove ads
-        
-        // Remove all anchor tags and their content completely
-        $('a').remove();
-        
-        // Remove non-text elements but keep structure
-        $('script, style, noscript, iframe, object, embed').remove();
-        $('button, input, form, select, textarea').remove();
-        
-        // Keep only the main content area if it exists
-        const mainContent = $('.jdp-left-content').length > 0 
-            ? $('.jdp-left-content') 
-            : $('body');
-        
-        // Stop processing at skills section if it exists
-        mainContent.find('.jdp-required-skills').nextAll().remove();
-        mainContent.find('.jdp-required-skills').remove();
-        
-        // Get text content and clean it up
-        let text = mainContent.text();
-        
-        // Clean up whitespace and formatting
-        text = text
-            .replace(/\s+/g, ' ') // Multiple spaces to single space
-            .replace(/\n\s*\n/g, '\n\n') // Multiple newlines to double newline
-            .replace(/^\s+|\s+$/g, '') // Trim start and end
-            .replace(/\*{3,}/g, '') // Remove asterisk dividers
-            .replace(/_{3,}/g, '') // Remove underscore dividers
-            .replace(/-{3,}/g, '') // Remove dash dividers
-            .replace(/={3,}/g, '') // Remove equals dividers
-            .replace(/\s*\|\s*/g, ' | ') // Clean up pipe separators
-            .replace(/\s*\.\s*\.\s*\./g, '...') // Clean up ellipsis
-            .trim();
-        
-        // Remove common footer content
-        const footerPatterns = [
-            /All listed states are eligible to apply.*$/i,
-            /CareerBuilder TIP.*$/i,
-            /For your privacy and protection.*$/i,
-            /By applying to a job using CareerBuilder.*$/i,
-            /Job ID:.*$/i,
-            /Help us improve CareerBuilder.*$/i,
-            /Report this job.*$/i
-        ];
-        
-        for (const pattern of footerPatterns) {
-            text = text.replace(pattern, '');
-        }
-        
-        // Final cleanup
-        text = text.trim();
-        
-        return text;
-    } catch (error) {
-        // Fallback: simple HTML tag removal
-        return htmlDescription
-            .replace(/<a[^>]*>.*?<\/a>/gi, '') // Remove anchor tags and content
-            .replace(/<script[^>]*>.*?<\/script>/gi, '') // Remove scripts
-            .replace(/<style[^>]*>.*?<\/style>/gi, '') // Remove styles
-            .replace(/<[^>]+>/g, ' ') // Remove all HTML tags
-            .replace(/\s+/g, ' ') // Multiple spaces to single space
-            .trim();
-    }
-};
-
 // ------------------------- PROXY & CRAWLER -------------------------
 const proxyConf = proxyConfiguration
     ? await Actor.createProxyConfiguration(proxyConfiguration)
@@ -425,20 +411,52 @@ const crawler = new CheerioCrawler({
                     
                     scrapedUrls.add(jobUrl);
                     
-                    const rawDescription = job.description || '';
+                    // Extract location details
+                    let locationStr = 'Not specified';
+                    let city = '';
+                    let state = '';
+                    let country = '';
+                    
+                    if (job.jobLocation) {
+                        if (typeof job.jobLocation === 'string') {
+                            locationStr = job.jobLocation;
+                        } else if (job.jobLocation.address) {
+                            const addr = job.jobLocation.address;
+                            city = addr.addressLocality || '';
+                            state = addr.addressRegion || '';
+                            country = addr.addressCountry || '';
+                            locationStr = [city, state, country].filter(Boolean).join(', ');
+                        }
+                    }
+                    
+                    // Extract salary details
+                    let salaryStr = 'Not specified';
+                    if (job.baseSalary) {
+                        if (job.baseSalary.value) {
+                            salaryStr = String(job.baseSalary.value);
+                        } else if (job.baseSalary.minValue && job.baseSalary.maxValue) {
+                            salaryStr = `${job.baseSalary.minValue} - ${job.baseSalary.maxValue}`;
+                        }
+                        if (job.baseSalary.currency) {
+                            salaryStr = `${job.baseSalary.currency} ${salaryStr}`;
+                        }
+                    }
                     
                     const jobData = {
                         title: job.title || job.name || 'Not specified',
                         company: job.hiringOrganization?.name || 'Not specified',
-                        location: typeof job.jobLocation === 'string' 
-                            ? job.jobLocation 
-                            : job.jobLocation?.address?.addressLocality || 'Not specified',
+                        location: locationStr,
+                        city: city || 'Not specified',
+                        state: state || 'Not specified',
+                        country: country || 'Not specified',
                         date_posted: job.datePosted || 'Not specified',
-                        salary: job.baseSalary?.value || job.estimatedSalary || 'Not specified',
+                        valid_through: job.validThrough || 'Not specified',
+                        salary: salaryStr,
                         job_type: job.employmentType || 'Not specified',
-                        description_text: extractCleanDescription(rawDescription),
-                        description_html: rawDescription,
+                        description_text: job.description || '',
+                        description_html: job.description || '',
                         url: jobUrl,
+                        job_id: job.identifier?.value || '',
                         scraped_at: new Date().toISOString(),
                         source: 'json-ld'
                     };
@@ -521,20 +539,52 @@ const crawler = new CheerioCrawler({
             if (jsonLdJobs.length > 0) {
                 const job = jsonLdJobs[0];
                 
-                const rawDescription = job.description || '';
+                // Extract location details
+                let locationStr = 'Not specified';
+                let city = '';
+                let state = '';
+                let country = '';
+                
+                if (job.jobLocation) {
+                    if (typeof job.jobLocation === 'string') {
+                        locationStr = job.jobLocation;
+                    } else if (job.jobLocation.address) {
+                        const addr = job.jobLocation.address;
+                        city = addr.addressLocality || '';
+                        state = addr.addressRegion || '';
+                        country = addr.addressCountry || '';
+                        locationStr = [city, state, country].filter(Boolean).join(', ');
+                    }
+                }
+                
+                // Extract salary details
+                let salaryStr = 'Not specified';
+                if (job.baseSalary) {
+                    if (job.baseSalary.value) {
+                        salaryStr = String(job.baseSalary.value);
+                    } else if (job.baseSalary.minValue && job.baseSalary.maxValue) {
+                        salaryStr = `${job.baseSalary.minValue} - ${job.baseSalary.maxValue}`;
+                    }
+                    if (job.baseSalary.currency) {
+                        salaryStr = `${job.baseSalary.currency} ${salaryStr}`;
+                    }
+                }
                 
                 const jobData = {
                     title: job.title || job.name || 'Not specified',
                     company: job.hiringOrganization?.name || 'Not specified',
-                    location: typeof job.jobLocation === 'string' 
-                        ? job.jobLocation 
-                        : job.jobLocation?.address?.addressLocality || 'Not specified',
+                    location: locationStr,
+                    city: city || 'Not specified',
+                    state: state || 'Not specified',
+                    country: country || 'Not specified',
                     date_posted: job.datePosted || 'Not specified',
-                    salary: job.baseSalary?.value || job.estimatedSalary || 'Not specified',
+                    valid_through: job.validThrough || 'Not specified',
+                    salary: salaryStr,
                     job_type: job.employmentType || 'Not specified',
-                    description_text: extractCleanDescription(rawDescription),
-                    description_html: rawDescription,
+                    description_text: job.description || '',
+                    description_html: job.description || '',
                     url: request.url,
+                    job_id: job.identifier?.value || '',
                     scraped_at: new Date().toISOString(),
                     source: 'json-ld-detail'
                 };
@@ -569,6 +619,7 @@ const crawler = new CheerioCrawler({
                               'Not specified';
 
             const description = $('[class*="description"]').first().html() || '';
+            const descriptionText = $('[class*="description"]').first().text().trim() || '';
 
             const jobData = {
                 title,
@@ -578,7 +629,7 @@ const crawler = new CheerioCrawler({
                 salary: 'Not specified',
                 job_type: 'Not specified',
                 description_html: description,
-                description_text: extractCleanDescription(description),
+                description_text: descriptionText,
                 url: request.url,
                 scraped_at: new Date().toISOString(),
                 source: 'html-scraping'
