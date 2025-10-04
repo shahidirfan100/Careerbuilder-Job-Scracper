@@ -84,6 +84,53 @@ const normalizeCookieHeader = ({ cookies: rawCookies, cookiesJson: jsonCookies }
     return '';
 };
 
+// NEW: Clean description text - removes HTML and unwanted sections
+const cleanDescriptionText = ($element) => {
+    if (!$element || $element.length === 0) return '';
+    
+    const $clone = $element.clone();
+    
+    // Remove unwanted sections
+    $clone.find('.jdp-required-skills, #apply-bottom-content, #apply-bottom, #cb-tip').remove();
+    $clone.find('#ads-mobile-placeholder, #ads-desktop-placeholder, #col-right').remove();
+    $clone.find('.seperate-top-border-mobile, .site-tip, .report-job-link').remove();
+    $clone.find('button, script, style, noscript').remove();
+    
+    // Get text and format it
+    let text = $clone.text();
+    text = text.replace(/\s+/g, ' ');  // Multiple spaces to single
+    text = text.replace(/\n\s*\n\s*\n+/g, '\n\n');  // Clean newlines
+    
+    return text.trim();
+};
+
+// NEW: Clean description HTML - keeps only job content, removes links
+const cleanDescriptionHtml = ($element) => {
+    if (!$element || $element.length === 0) return '';
+    
+    const $clone = $element.clone();
+    
+    // Remove unwanted sections
+    $clone.find('.jdp-required-skills, #apply-bottom-content, #apply-bottom, #cb-tip').remove();
+    $clone.find('#ads-mobile-placeholder, #ads-desktop-placeholder, #col-right').remove();
+    $clone.find('.seperate-top-border-mobile, .site-tip').remove();
+    $clone.find('button, script, style, noscript').remove();
+    
+    // Remove all <a> tags but keep text content
+    $clone.find('a').each(function() {
+        const $this = $clone.constructor(this);
+        $this.replaceWith($this.text());
+    });
+    
+    // Remove empty elements
+    $clone.find('p:empty, div:empty').remove();
+    
+    let html = $clone.html() || '';
+    html = html.replace(/\s+/g, ' ').replace(/>\s+</g, '><');
+    
+    return html.trim();
+};
+
 // Extract JSON-LD structured data from page
 const extractJsonLd = ($, crawlerLog) => {
     const jsonLdScripts = $('script[type="application/ld+json"]').toArray();
@@ -124,71 +171,7 @@ const extractJsonLd = ($, crawlerLog) => {
     return jobPostings;
 };
 
-// Clean and format description text
-const cleanDescriptionText = ($element) => {
-    // Clone the element to avoid modifying the original
-    const $clone = $element.clone();
-    
-    // Remove unwanted sections
-    $clone.find('.jdp-required-skills').remove();
-    $clone.find('#apply-bottom-content').remove();
-    $clone.find('#cb-tip').remove();
-    $clone.find('#ads-mobile-placeholder').remove();
-    $clone.find('#ads-desktop-placeholder').remove();
-    $clone.find('.report-job-link').remove();
-    $clone.find('button').remove();
-    
-    // Get text and format it properly
-    let text = $clone.text();
-    
-    // Replace multiple spaces with single space
-    text = text.replace(/\s+/g, ' ');
-    
-    // Replace multiple newlines with double newline
-    text = text.replace(/\n\s*\n\s*\n+/g, '\n\n');
-    
-    // Trim and return
-    return text.trim();
-};
-
-// Clean description HTML (keep only job description content)
-const cleanDescriptionHtml = ($element) => {
-    // Clone to avoid modifying original
-    const $clone = $element.clone();
-    
-    // Remove unwanted sections
-    $clone.find('.jdp-required-skills').remove();
-    $clone.find('#apply-bottom-content').remove();
-    $clone.find('#apply-bottom').remove();
-    $clone.find('#cb-tip').remove();
-    $clone.find('#ads-mobile-placeholder').remove();
-    $clone.find('#ads-desktop-placeholder').remove();
-    $clone.find('#col-right').remove();
-    $clone.find('.seperate-top-border-mobile').remove();
-    $clone.find('.site-tip').remove();
-    $clone.find('button').remove();
-    
-    // Remove all <a> tags but keep their text content
-    $clone.find('a').each((_, el) => {
-        const $el = $clone.constructor(el);
-        $el.replaceWith($el.text());
-    });
-    
-    // Remove script and style tags
-    $clone.find('script, style, noscript').remove();
-    
-    // Remove empty paragraphs and divs
-    $clone.find('p:empty, div:empty, br + br + br').remove();
-    
-    // Get the HTML
-    let html = $clone.html() || '';
-    
-    // Clean up excessive whitespace in HTML
-    html = html.replace(/\s+/g, ' ');
-    html = html.replace(/>\s+</g, '><');
-    
-    return html.trim();
-};
+// Extract job URLs from listing page
 const extractJobUrls = ($, crawlerLog) => {
     const urls = new Set();
     
@@ -235,7 +218,7 @@ const extractJobUrls = ($, crawlerLog) => {
     for (const strategy of strategies) {
         try {
             strategy();
-            if (urls.size > 0) break; // Use first successful strategy
+            if (urls.size > 0) break;
         } catch (e) {
             crawlerLog.debug(`Strategy failed: ${e.message}`);
         }
@@ -257,7 +240,6 @@ const extractJobUrls = ($, crawlerLog) => {
 
 // Find next page URL
 const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
-    // Strategy 1: Look for next button/link
     const nextSelectors = [
         'a[aria-label*="Next"]',
         'a.next',
@@ -278,7 +260,6 @@ const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
         }
     }
     
-    // Strategy 2: Look for page numbers
     if (!nextUrl) {
         const pageLinks = $('a[href*="page"]').toArray();
         for (const link of pageLinks) {
@@ -292,7 +273,6 @@ const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
         }
     }
     
-    // Strategy 3: Construct URL manually with page_number parameter
     if (!nextUrl) {
         try {
             const url = new URL(currentUrl);
@@ -305,7 +285,6 @@ const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
         }
     }
     
-    // Strategy 4: For URLs with path-based pagination (e.g., /page/2)
     if (!nextUrl) {
         try {
             const url = new URL(currentUrl);
@@ -329,7 +308,7 @@ const proxyConf = proxyConfiguration
     : undefined;
 
 let jobsScraped = 0;
-const scrapedUrls = new Set(); // Track scraped URLs to avoid duplicates
+const scrapedUrls = new Set();
 
 const crawler = new CheerioCrawler({
     proxyConfiguration: proxyConf,
@@ -377,13 +356,13 @@ const crawler = new CheerioCrawler({
         const { label = 'LIST', page = 1 } = request.userData;
 
         if (jobsScraped >= RESULTS_WANTED) {
-            crawlerLog.info(`✓ Target reached: ${RESULTS_WANTED} jobs scraped`);
+            crawlerLog.info(`Target reached: ${RESULTS_WANTED} jobs scraped`);
             return;
         }
 
         // ============= LIST PAGE HANDLER =============
         if (label === 'LIST') {
-            crawlerLog.info(`📄 Scraping listing page ${page}: ${request.url}`);
+            crawlerLog.info(`Scraping listing page ${page}: ${request.url}`);
             
             const pageTitle = $('title').text();
             crawlerLog.info(`Page title: "${pageTitle}"`);
@@ -392,7 +371,7 @@ const crawler = new CheerioCrawler({
             const bodyText = $('body').text().toLowerCase();
             if (bodyText.includes('access denied') || bodyText.includes('captcha') || 
                 bodyText.includes('security check') || bodyText.includes('blocked')) {
-                crawlerLog.error('🚫 BLOCKED! Enable proxy configuration or add cookies');
+                crawlerLog.error('BLOCKED! Enable proxy configuration or add cookies');
                 session.retire();
                 return;
             }
@@ -400,7 +379,7 @@ const crawler = new CheerioCrawler({
             // METHOD 1: Try to extract JSON-LD first (most reliable)
             const jsonLdJobs = extractJsonLd($, crawlerLog);
             if (jsonLdJobs.length > 0) {
-                crawlerLog.info(`✨ Found ${jsonLdJobs.length} jobs in JSON-LD data`);
+                crawlerLog.info(`Found ${jsonLdJobs.length} jobs in JSON-LD data`);
                 
                 let jobsToSave = 0;
                 for (const job of jsonLdJobs) {
@@ -411,52 +390,28 @@ const crawler = new CheerioCrawler({
                     
                     scrapedUrls.add(jobUrl);
                     
-                    // Extract location details
-                    let locationStr = 'Not specified';
-                    let city = '';
-                    let state = '';
-                    let country = '';
+                    // NEW: Clean the description if it contains HTML
+                    let descriptionHtml = job.description || '';
+                    let descriptionText = job.description || '';
                     
-                    if (job.jobLocation) {
-                        if (typeof job.jobLocation === 'string') {
-                            locationStr = job.jobLocation;
-                        } else if (job.jobLocation.address) {
-                            const addr = job.jobLocation.address;
-                            city = addr.addressLocality || '';
-                            state = addr.addressRegion || '';
-                            country = addr.addressCountry || '';
-                            locationStr = [city, state, country].filter(Boolean).join(', ');
-                        }
-                    }
-                    
-                    // Extract salary details
-                    let salaryStr = 'Not specified';
-                    if (job.baseSalary) {
-                        if (job.baseSalary.value) {
-                            salaryStr = String(job.baseSalary.value);
-                        } else if (job.baseSalary.minValue && job.baseSalary.maxValue) {
-                            salaryStr = `${job.baseSalary.minValue} - ${job.baseSalary.maxValue}`;
-                        }
-                        if (job.baseSalary.currency) {
-                            salaryStr = `${job.baseSalary.currency} ${salaryStr}`;
-                        }
+                    if (descriptionHtml.includes('<')) {
+                        const $tempDiv = $('<div>').html(descriptionHtml);
+                        descriptionHtml = cleanDescriptionHtml($tempDiv);
+                        descriptionText = cleanDescriptionText($tempDiv);
                     }
                     
                     const jobData = {
                         title: job.title || job.name || 'Not specified',
                         company: job.hiringOrganization?.name || 'Not specified',
-                        location: locationStr,
-                        city: city || 'Not specified',
-                        state: state || 'Not specified',
-                        country: country || 'Not specified',
+                        location: typeof job.jobLocation === 'string' 
+                            ? job.jobLocation 
+                            : job.jobLocation?.address?.addressLocality || 'Not specified',
                         date_posted: job.datePosted || 'Not specified',
-                        valid_through: job.validThrough || 'Not specified',
-                        salary: salaryStr,
+                        salary: job.baseSalary?.value || job.estimatedSalary || 'Not specified',
                         job_type: job.employmentType || 'Not specified',
-                        description_text: job.description || '',
-                        description_html: job.description || '',
+                        description_text: descriptionText,
+                        description_html: descriptionHtml,
                         url: jobUrl,
-                        job_id: job.identifier?.value || '',
                         scraped_at: new Date().toISOString(),
                         source: 'json-ld'
                     };
@@ -464,20 +419,20 @@ const crawler = new CheerioCrawler({
                     await Dataset.pushData(jobData);
                     jobsScraped++;
                     jobsToSave++;
-                    crawlerLog.info(`✅ [${jobsScraped}/${RESULTS_WANTED}] ${jobData.title}`);
+                    crawlerLog.info(`[${jobsScraped}/${RESULTS_WANTED}] ${jobData.title}`);
                 }
                 
                 if (jobsToSave > 0) {
-                    crawlerLog.info(`💾 Saved ${jobsToSave} jobs from JSON-LD`);
+                    crawlerLog.info(`Saved ${jobsToSave} jobs from JSON-LD`);
                 }
             }
 
             // METHOD 2: Extract job URLs and enqueue detail pages
             const jobUrls = extractJobUrls($, crawlerLog);
-            crawlerLog.info(`🔗 Found ${jobUrls.length} job URLs on page`);
+            crawlerLog.info(`Found ${jobUrls.length} job URLs on page`);
             
             if (jobUrls.length === 0 && jsonLdJobs.length === 0) {
-                crawlerLog.warning('⚠️ No jobs found! Possible causes:');
+                crawlerLog.warning('No jobs found! Possible causes:');
                 crawlerLog.warning('  - Site structure changed');
                 crawlerLog.warning('  - Being blocked (try proxy)');
                 crawlerLog.warning('  - Search returned no results');
@@ -495,7 +450,7 @@ const crawler = new CheerioCrawler({
             }
 
             if (urlsToEnqueue.length > 0) {
-                crawlerLog.info(`➕ Enqueueing ${urlsToEnqueue.length} detail pages`);
+                crawlerLog.info(`Enqueueing ${urlsToEnqueue.length} detail pages`);
                 await enqueueLinks({
                     urls: urlsToEnqueue,
                     userData: { label: 'DETAIL' },
@@ -507,84 +462,60 @@ const crawler = new CheerioCrawler({
                 const nextUrl = findNextPageUrl($, request.url, page, crawlerLog);
                 
                 if (nextUrl && nextUrl !== request.url) {
-                    crawlerLog.info(`📄 Next page found: ${page + 1}`);
+                    crawlerLog.info(`Next page found: ${page + 1}`);
                     await enqueueLinks({
                         urls: [nextUrl],
                         userData: { label: 'LIST', page: page + 1 },
                     });
                 } else {
-                    crawlerLog.info('🏁 No more pages to scrape');
+                    crawlerLog.info('No more pages to scrape');
                 }
             } else if (page >= MAX_PAGES) {
-                crawlerLog.info(`🛑 Max pages limit reached: ${MAX_PAGES}`);
+                crawlerLog.info(`Max pages limit reached: ${MAX_PAGES}`);
             }
         }
 
         // ============= DETAIL PAGE HANDLER =============
         if (label === 'DETAIL') {
             if (jobsScraped >= RESULTS_WANTED) {
-                crawlerLog.info(`⏭️ Skipping (limit reached): ${request.url}`);
+                crawlerLog.info(`Skipping (limit reached): ${request.url}`);
                 return;
             }
 
             if (scrapedUrls.has(request.url)) {
-                crawlerLog.info(`⏭️ Already scraped: ${request.url}`);
+                crawlerLog.info(`Already scraped: ${request.url}`);
                 return;
             }
 
-            crawlerLog.info(`🔍 Scraping job detail: ${request.url}`);
+            crawlerLog.info(`Scraping job detail: ${request.url}`);
             
             // Try JSON-LD first
             const jsonLdJobs = extractJsonLd($, crawlerLog);
             if (jsonLdJobs.length > 0) {
                 const job = jsonLdJobs[0];
                 
-                // Extract location details
-                let locationStr = 'Not specified';
-                let city = '';
-                let state = '';
-                let country = '';
+                // NEW: Clean the description if it contains HTML
+                let descriptionHtml = job.description || '';
+                let descriptionText = job.description || '';
                 
-                if (job.jobLocation) {
-                    if (typeof job.jobLocation === 'string') {
-                        locationStr = job.jobLocation;
-                    } else if (job.jobLocation.address) {
-                        const addr = job.jobLocation.address;
-                        city = addr.addressLocality || '';
-                        state = addr.addressRegion || '';
-                        country = addr.addressCountry || '';
-                        locationStr = [city, state, country].filter(Boolean).join(', ');
-                    }
-                }
-                
-                // Extract salary details
-                let salaryStr = 'Not specified';
-                if (job.baseSalary) {
-                    if (job.baseSalary.value) {
-                        salaryStr = String(job.baseSalary.value);
-                    } else if (job.baseSalary.minValue && job.baseSalary.maxValue) {
-                        salaryStr = `${job.baseSalary.minValue} - ${job.baseSalary.maxValue}`;
-                    }
-                    if (job.baseSalary.currency) {
-                        salaryStr = `${job.baseSalary.currency} ${salaryStr}`;
-                    }
+                if (descriptionHtml.includes('<')) {
+                    const $tempDiv = $('<div>').html(descriptionHtml);
+                    descriptionHtml = cleanDescriptionHtml($tempDiv);
+                    descriptionText = cleanDescriptionText($tempDiv);
                 }
                 
                 const jobData = {
                     title: job.title || job.name || 'Not specified',
                     company: job.hiringOrganization?.name || 'Not specified',
-                    location: locationStr,
-                    city: city || 'Not specified',
-                    state: state || 'Not specified',
-                    country: country || 'Not specified',
+                    location: typeof job.jobLocation === 'string' 
+                        ? job.jobLocation 
+                        : job.jobLocation?.address?.addressLocality || 'Not specified',
                     date_posted: job.datePosted || 'Not specified',
-                    valid_through: job.validThrough || 'Not specified',
-                    salary: salaryStr,
+                    salary: job.baseSalary?.value || job.estimatedSalary || 'Not specified',
                     job_type: job.employmentType || 'Not specified',
-                    description_text: job.description || '',
-                    description_html: job.description || '',
+                    description_text: descriptionText,
+                    description_html: descriptionHtml,
                     url: request.url,
-                    job_id: job.identifier?.value || '',
                     scraped_at: new Date().toISOString(),
                     source: 'json-ld-detail'
                 };
@@ -592,7 +523,7 @@ const crawler = new CheerioCrawler({
                 scrapedUrls.add(request.url);
                 await Dataset.pushData(jobData);
                 jobsScraped++;
-                crawlerLog.info(`✅ [${jobsScraped}/${RESULTS_WANTED}] ${jobData.title}`);
+                crawlerLog.info(`[${jobsScraped}/${RESULTS_WANTED}] ${jobData.title}`);
                 return;
             }
 
@@ -601,7 +532,7 @@ const crawler = new CheerioCrawler({
                          $('[class*="title"]').first().text().trim();
 
             if (!title) {
-                crawlerLog.warning(`❌ Could not extract title from ${request.url}`);
+                crawlerLog.warning(`Could not extract title from ${request.url}`);
                 session.retire();
                 return;
             }
@@ -618,8 +549,17 @@ const crawler = new CheerioCrawler({
                               $('[class*="posted"]').first().text().trim() ||
                               'Not specified';
 
-            const description = $('[class*="description"]').first().html() || '';
-            const descriptionText = $('[class*="description"]').first().text().trim() || '';
+            // NEW: Use cleaning functions for HTML fallback
+            let $descElement = $('#jdp_description').first();
+            if ($descElement.length === 0) {
+                $descElement = $('[class*="description"]').first();
+            }
+            if ($descElement.length === 0) {
+                $descElement = $('.jdp-left-content').first();
+            }
+
+            const description = cleanDescriptionHtml($descElement);
+            const descriptionText = cleanDescriptionText($descElement);
 
             const jobData = {
                 title,
@@ -638,12 +578,12 @@ const crawler = new CheerioCrawler({
             scrapedUrls.add(request.url);
             await Dataset.pushData(jobData);
             jobsScraped++;
-            crawlerLog.info(`✅ [${jobsScraped}/${RESULTS_WANTED}] ${title}`);
+            crawlerLog.info(`[${jobsScraped}/${RESULTS_WANTED}] ${title}`);
         }
     },
 
     failedRequestHandler: async ({ request }, error) => {
-        log.error(`❌ Request failed: ${request.url}`);
+        log.error(`Request failed: ${request.url}`);
         log.error(`Error: ${error.message}`);
     },
 });
@@ -652,7 +592,6 @@ const crawler = new CheerioCrawler({
 let initialUrl;
 
 if (startUrl) {
-    // Use provided URL
     initialUrl = normalizeStartUrl(startUrl);
     if (!initialUrl) {
         log.error('Invalid startUrl provided. Please provide a valid CareerBuilder URL.');
@@ -660,46 +599,44 @@ if (startUrl) {
     }
     log.info('Using provided start URL (ignoring keyword/location parameters)');
 } else if (keyword || location) {
-    // Build URL from keyword/location
     initialUrl = buildStartUrl(keyword, location, posted_date);
     log.info('Building URL from keyword/location parameters');
 } else {
-    // No parameters provided - use a default search
     log.warning('No startUrl, keyword, or location provided. Using default CareerBuilder jobs page.');
     initialUrl = 'https://www.careerbuilder.com/jobs?cb_apply=false&radius=50&cb_veterans=false&cb_workhome=all';
 }
 
-log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-log.info('🚀 CareerBuilder Scraper Starting');
-log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-log.info(`📊 Target: ${RESULTS_WANTED} jobs`);
-log.info(`📄 Max pages: ${MAX_PAGES}`);
-log.info(`🔗 Start URL: ${initialUrl}`);
-log.info(`🛡️ Proxy: ${proxyConf ? '✓ ENABLED' : '✗ DISABLED (may cause blocking)'}`);
-log.info(`🍪 Cookies: ${cookies || cookiesJson ? '✓ PROVIDED' : '✗ NOT PROVIDED'}`);
-log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+log.info('==========================================');
+log.info('CareerBuilder Scraper Starting');
+log.info('==========================================');
+log.info(`Target: ${RESULTS_WANTED} jobs`);
+log.info(`Max pages: ${MAX_PAGES}`);
+log.info(`Start URL: ${initialUrl}`);
+log.info(`Proxy: ${proxyConf ? 'ENABLED' : 'DISABLED (may cause blocking)'}`);
+log.info(`Cookies: ${cookies || cookiesJson ? 'PROVIDED' : 'NOT PROVIDED'}`);
+log.info('==========================================');
 
 if (!proxyConf) {
-    log.warning('⚠️ WARNING: No proxy configured! You may get blocked.');
-    log.warning('⚠️ Enable "Apify Proxy" in input for best results.');
+    log.warning('WARNING: No proxy configured! You may get blocked.');
+    log.warning('Enable "Apify Proxy" in input for best results.');
 }
 
 await crawler.run([{ url: initialUrl, userData: { label: 'LIST', page: 1 } }]);
 
-log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-log.info(`🏁 Scraping Complete`);
-log.info(`✅ Successfully scraped: ${jobsScraped} jobs`);
-log.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+log.info('==========================================');
+log.info(`Scraping Complete`);
+log.info(`Successfully scraped: ${jobsScraped} jobs`);
+log.info('==========================================');
 
 if (jobsScraped === 0) {
-    log.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    log.error('❌ NO JOBS SCRAPED - TROUBLESHOOTING:');
-    log.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    log.error('1. ✓ Enable "Apify Proxy" in actor input');
-    log.error('2. ✓ Try adding custom cookies from your browser');
-    log.error('3. ✓ Check if your search parameters return results on website');
-    log.error('4. ✓ Try different keywords or locations');
-    log.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    log.error('==========================================');
+    log.error('NO JOBS SCRAPED - TROUBLESHOOTING:');
+    log.error('==========================================');
+    log.error('1. Enable "Apify Proxy" in actor input');
+    log.error('2. Try adding custom cookies from your browser');
+    log.error('3. Check if your search parameters return results on website');
+    log.error('4. Try different keywords or locations');
+    log.error('==========================================');
 }
 
 await Actor.exit();
