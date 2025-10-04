@@ -63,20 +63,21 @@
       "editor": "number"
     },
     "proxyConfiguration": {
-      "title": "Proxy Configuration",
+      "title": "⚠️ REQUIRED: Proxy Configuration",
       "type": "object",
-      "description": "HIGHLY RECOMMENDED: Use Apify Proxy to avoid blocking. Without proxy, you will likely get blocked by CareerBuilder.",
+      "description": "🚨 CRITICAL: Without proxy, you WILL be blocked! Use Apify Residential Proxy for best results. CareerBuilder has strong anti-bot protection.",
       "editor": "proxy",
       "prefill": {
-        "useApifyProxy": true
+        "useApifyProxy": true,
+        "apifyProxyGroups": ["RESIDENTIAL"]
       }
     },
     "cookies": {
-      "title": "Custom Cookies (Raw)",
+      "title": "🍪 Cookies (HIGHLY Recommended)",
       "type": "string",
-      "description": "Optional: Raw Cookie header string to bypass consent banners or improve success rate. Format: 'cookie1=value1; cookie2=value2'",
+      "description": "⚠️ IMPORTANT: For best results, add cookies from your browser. Format: 'cookie1=value1; cookie2=value2'. See documentation for how to get cookies. Without cookies, you may get blocked even with proxy!",
       "editor": "textfield",
-      "sectionCaption": "Advanced Options (Optional)"
+      "sectionCaption": "Anti-Blocking Options (Critical for Success)"
     },
     "cookiesJson": {
       "title": "Custom Cookies (JSON)",
