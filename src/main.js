@@ -582,20 +582,9 @@ const crawler = new CheerioCrawler({
         }
     },
 
-    failedRequestHandler: async ({ request, session }, error) => {
+    failedRequestHandler: async ({ request }, error) => {
         log.error(`Request failed: ${request.url}`);
         log.error(`Error: ${error.message}`);
-        
-        // Retire session immediately on 403
-        if (error.message.includes('403') || error.message.includes('blocked')) {
-            log.warning('Got 403 - retiring session to get fresh IP');
-            if (session) {
-                session.retire();
-            }
-            
-            // Add longer delay before next request
-            await new Promise(resolve => setTimeout(resolve, 5000));
-        }
     },
 });
 
