@@ -238,91 +238,68 @@ const extractJobUrls = ($, crawlerLog) => {
     return absoluteUrls;
 };
 
-// Find next page URL - CONSERVATIVE ENHANCED VERSION
+// Find next page URL
 const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
-    crawlerLog.info(`Looking for next page. Current page: ${currentPage}, URL: ${currentUrl}`);
-    
-    // Strategy 1: Look for explicit next page links (most reliable)
     const nextSelectors = [
         'a[aria-label*="Next"]',
-        'a[aria-label*="next"]', 
         'a.next',
         'a[rel="next"]',
         'button[aria-label*="Next"]',
         '.pagination a:contains("Next")',
-        'a.pagination-next'
+        'a.pagination-next',
+        'a[data-page="next"]'
     ];
     
     let nextUrl = null;
     for (const selector of nextSelectors) {
-        const $element = $(selector).first();
-        if ($element.length > 0) {
-            const href = $element.attr('href');
-            const isDisabled = $element.hasClass('disabled') || $element.attr('disabled') || 
-                              $element.closest('li').hasClass('disabled');
-            
-            if (href && !isDisabled) {
-                nextUrl = href;
-                crawlerLog.info(`Found next page with selector: ${selector} -> ${href}`);
-                break;
-            }
+        const href = $(selector).first().attr('href');
+        if (href) {
+            nextUrl = href;
+            crawlerLog.debug(`Found next page with selector: ${selector}`);
+            break;
         }
     }
     
-    // Strategy 2: Look for numbered pagination - next number
     if (!nextUrl) {
-        crawlerLog.debug('Trying numbered pagination strategy...');
         const pageLinks = $('a[href*="page"]').toArray();
-        
         for (const link of pageLinks) {
             const href = $(link).attr('href');
             const text = $(link).text().trim();
-            const pageNum = parseInt(text);
-            
-            if (!isNaN(pageNum) && pageNum === currentPage + 1 && href) {
+            if (text === String(currentPage + 1)) {
                 nextUrl = href;
-                crawlerLog.info(`Found next page by number: ${pageNum} -> ${href}`);
+                crawlerLog.debug('Found next page by page number');
                 break;
             }
         }
     }
     
-    // Strategy 3: URL parameter manipulation - CareerBuilder specific
     if (!nextUrl) {
-        crawlerLog.debug('Trying URL parameter manipulation...');
         try {
             const url = new URL(currentUrl);
-            
-            // CareerBuilder uses 'page_number' parameter
-            if (url.searchParams.has('page_number')) {
-                const currentPageNum = parseInt(url.searchParams.get('page_number') || '1');
-                url.searchParams.set('page_number', String(currentPageNum + 1));
-                nextUrl = url.href;
-                crawlerLog.info(`Constructed next page URL using page_number: page ${currentPageNum + 1}`);
-            } else {
-                // Add page_number parameter if it doesn't exist
-                url.searchParams.set('page_number', String(currentPage + 1));
-                nextUrl = url.href;
-                crawlerLog.info(`Added page_number parameter: page ${currentPage + 1}`);
-            }
+            const currentPageNum = parseInt(url.searchParams.get('page_number') || '1');
+            url.searchParams.set('page_number', String(currentPageNum + 1));
+            nextUrl = url.href;
+            crawlerLog.info(`Constructed next page URL: page ${currentPageNum + 1}`);
         } catch (e) {
             crawlerLog.debug(`Failed to construct next URL: ${e.message}`);
         }
     }
     
-    if (nextUrl) {
+    if (!nextUrl) {
         try {
-            const absoluteUrl = new URL(nextUrl, 'https://www.careerbuilder.com').href;
-            crawlerLog.info(`Final next page URL: ${absoluteUrl}`);
-            return absoluteUrl;
+            const url = new URL(currentUrl);
+            if (url.pathname.includes('/page/')) {
+                const newPath = url.pathname.replace(/\/page\/\d+/, `/page/${currentPage + 1}`);
+                url.pathname = newPath;
+                nextUrl = url.href;
+                crawlerLog.info(`Constructed next page URL from path: page ${currentPage + 1}`);
+            }
         } catch (e) {
-            crawlerLog.error(`Invalid next URL constructed: ${nextUrl}`);
-            return null;
+            crawlerLog.debug(`Failed to construct path-based URL: ${e.message}`);
         }
     }
     
-    crawlerLog.warning(`No next page URL found for page ${currentPage}`);
-    return null;
+    return nextUrl ? new URL(nextUrl, 'https://www.careerbuilder.com').href : null;
 };
 
 // ------------------------- PROXY & CRAWLER -------------------------
@@ -335,16 +312,16 @@ const scrapedUrls = new Set();
 
 const crawler = new CheerioCrawler({
     proxyConfiguration: proxyConf,
-    maxRequestsPerMinute: 30, // Reduced from 60 to be less aggressive
+    maxRequestsPerMinute: 60,
     requestHandlerTimeoutSecs: 120,
     navigationTimeoutSecs: 120,
-    maxConcurrency: 2, // Reduced from 3 to be less aggressive
+    maxConcurrency: 3,
     useSessionPool: true,
     persistCookiesPerSession: true,
     sessionPoolOptions: {
-        maxPoolSize: 10, // Reduced from 20
+        maxPoolSize: 20,
         sessionOptions: {
-            maxUsageCount: 10, // Reduced from 15
+            maxUsageCount: 15,
             maxErrorScore: 1,
         },
     },
@@ -401,7 +378,6 @@ const crawler = new CheerioCrawler({
 
             // METHOD 1: Try to extract JSON-LD first (most reliable)
             const jsonLdJobs = extractJsonLd($, crawlerLog);
-            
             if (jsonLdJobs.length > 0) {
                 crawlerLog.info(`Found ${jsonLdJobs.length} jobs in JSON-LD data`);
                 
@@ -464,7 +440,7 @@ const crawler = new CheerioCrawler({
                 return;
             }
 
-            // Enqueue job detail pages (up to our limit) - CONSERVATIVE APPROACH
+            // Enqueue job detail pages (up to our limit)
             const urlsToEnqueue = [];
             for (const url of jobUrls) {
                 if (jobsScraped + urlsToEnqueue.length >= RESULTS_WANTED) break;
@@ -481,14 +457,8 @@ const crawler = new CheerioCrawler({
                 });
             }
 
-            // PAGINATION - SIMPLIFIED BUT IMPROVED LOGIC
-            const totalJobsFound = jsonLdJobs.length + jobUrls.length;
-            
-            // Only continue pagination if:
-            // 1. We haven't reached our target
-            // 2. We haven't hit max pages
-            // 3. We found jobs on this page (indicating more might exist)
-            if (jobsScraped < RESULTS_WANTED && page < MAX_PAGES && totalJobsFound > 0) {
+            // PAGINATION
+            if (jobsScraped < RESULTS_WANTED && page < MAX_PAGES) {
                 const nextUrl = findNextPageUrl($, request.url, page, crawlerLog);
                 
                 if (nextUrl && nextUrl !== request.url) {
@@ -502,8 +472,6 @@ const crawler = new CheerioCrawler({
                 }
             } else if (page >= MAX_PAGES) {
                 crawlerLog.info(`Max pages limit reached: ${MAX_PAGES}`);
-            } else if (totalJobsFound === 0) {
-                crawlerLog.info('No jobs found on this page - might have reached end');
             }
         }
 
@@ -614,9 +582,20 @@ const crawler = new CheerioCrawler({
         }
     },
 
-    failedRequestHandler: async ({ request }, error) => {
+    failedRequestHandler: async ({ request, session }, error) => {
         log.error(`Request failed: ${request.url}`);
         log.error(`Error: ${error.message}`);
+        
+        // Retire session immediately on 403
+        if (error.message.includes('403') || error.message.includes('blocked')) {
+            log.warning('Got 403 - retiring session to get fresh IP');
+            if (session) {
+                session.retire();
+            }
+            
+            // Add longer delay before next request
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
     },
 });
 
