@@ -238,11 +238,11 @@ const extractJobUrls = ($, crawlerLog) => {
     return absoluteUrls;
 };
 
-// Find next page URL - ENHANCED VERSION
+// Find next page URL - CONSERVATIVE ENHANCED VERSION
 const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
     crawlerLog.info(`Looking for next page. Current page: ${currentPage}, URL: ${currentUrl}`);
     
-    // Strategy 1: Look for explicit next page links
+    // Strategy 1: Look for explicit next page links (most reliable)
     const nextSelectors = [
         'a[aria-label*="Next"]',
         'a[aria-label*="next"]', 
@@ -250,12 +250,7 @@ const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
         'a[rel="next"]',
         'button[aria-label*="Next"]',
         '.pagination a:contains("Next")',
-        'a.pagination-next',
-        'a[data-page="next"]',
-        '.pager-next a',
-        '.next-page a',
-        'a[title*="Next"]',
-        'a[title*="next"]'
+        'a.pagination-next'
     ];
     
     let nextUrl = null;
@@ -276,8 +271,8 @@ const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
     
     // Strategy 2: Look for numbered pagination - next number
     if (!nextUrl) {
-        crawlerLog.info('Trying numbered pagination strategy...');
-        const pageLinks = $('a[href*="page"], a[href*="Page"]').toArray();
+        crawlerLog.debug('Trying numbered pagination strategy...');
+        const pageLinks = $('a[href*="page"]').toArray();
         
         for (const link of pageLinks) {
             const href = $(link).attr('href');
@@ -292,83 +287,26 @@ const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
         }
     }
     
-    // Strategy 3: URL parameter manipulation - multiple patterns
+    // Strategy 3: URL parameter manipulation - CareerBuilder specific
     if (!nextUrl) {
-        crawlerLog.info('Trying URL parameter manipulation...');
+        crawlerLog.debug('Trying URL parameter manipulation...');
         try {
             const url = new URL(currentUrl);
             
-            // Check different parameter names CareerBuilder might use
-            const pageParams = ['page_number', 'page', 'p', 'pagenum', 'pg'];
-            let paramFound = false;
-            
-            for (const param of pageParams) {
-                if (url.searchParams.has(param)) {
-                    const currentPageNum = parseInt(url.searchParams.get(param) || '1');
-                    url.searchParams.set(param, String(currentPageNum + 1));
-                    nextUrl = url.href;
-                    paramFound = true;
-                    crawlerLog.info(`Constructed next page URL using ${param}: page ${currentPageNum + 1}`);
-                    break;
-                }
-            }
-            
-            // If no page parameter exists, try adding one
-            if (!paramFound) {
-                // Try the most common parameter name
+            // CareerBuilder uses 'page_number' parameter
+            if (url.searchParams.has('page_number')) {
+                const currentPageNum = parseInt(url.searchParams.get('page_number') || '1');
+                url.searchParams.set('page_number', String(currentPageNum + 1));
+                nextUrl = url.href;
+                crawlerLog.info(`Constructed next page URL using page_number: page ${currentPageNum + 1}`);
+            } else {
+                // Add page_number parameter if it doesn't exist
                 url.searchParams.set('page_number', String(currentPage + 1));
                 nextUrl = url.href;
                 crawlerLog.info(`Added page_number parameter: page ${currentPage + 1}`);
             }
         } catch (e) {
             crawlerLog.debug(`Failed to construct next URL: ${e.message}`);
-        }
-    }
-    
-    // Strategy 4: Path-based pagination
-    if (!nextUrl) {
-        crawlerLog.info('Trying path-based pagination...');
-        try {
-            const url = new URL(currentUrl);
-            
-            // Pattern: /page/1, /page/2, etc.
-            if (url.pathname.includes('/page/')) {
-                const newPath = url.pathname.replace(/\/page\/\d+/, `/page/${currentPage + 1}`);
-                url.pathname = newPath;
-                nextUrl = url.href;
-                crawlerLog.info(`Constructed next page URL from path: page ${currentPage + 1}`);
-            }
-            // Pattern: /jobs/page-2, /jobs/page-3, etc.
-            else if (url.pathname.includes('page-')) {
-                const newPath = url.pathname.replace(/page-\d+/, `page-${currentPage + 1}`);
-                url.pathname = newPath;
-                nextUrl = url.href;
-                crawlerLog.info(`Constructed next page URL from dash notation: page ${currentPage + 1}`);
-            }
-        } catch (e) {
-            crawlerLog.debug(`Failed to construct path-based URL: ${e.message}`);
-        }
-    }
-    
-    // Strategy 5: Offset-based pagination (if CareerBuilder uses it)
-    if (!nextUrl) {
-        crawlerLog.info('Trying offset-based pagination...');
-        try {
-            const url = new URL(currentUrl);
-            const offsetParams = ['offset', 'start', 'from'];
-            
-            for (const param of offsetParams) {
-                if (url.searchParams.has(param)) {
-                    const currentOffset = parseInt(url.searchParams.get(param) || '0');
-                    const jobsPerPage = 25; // Common CareerBuilder page size
-                    url.searchParams.set(param, String(currentOffset + jobsPerPage));
-                    nextUrl = url.href;
-                    crawlerLog.info(`Constructed next page URL using offset ${param}: ${currentOffset + jobsPerPage}`);
-                    break;
-                }
-            }
-        } catch (e) {
-            crawlerLog.debug(`Failed to construct offset-based URL: ${e.message}`);
         }
     }
     
@@ -394,20 +332,19 @@ const proxyConf = proxyConfiguration
 
 let jobsScraped = 0;
 const scrapedUrls = new Set();
-const processedPages = new Set(); // NEW: Track processed pages to avoid duplicates
 
 const crawler = new CheerioCrawler({
     proxyConfiguration: proxyConf,
-    maxRequestsPerMinute: 60,
+    maxRequestsPerMinute: 30, // Reduced from 60 to be less aggressive
     requestHandlerTimeoutSecs: 120,
     navigationTimeoutSecs: 120,
-    maxConcurrency: 3,
+    maxConcurrency: 2, // Reduced from 3 to be less aggressive
     useSessionPool: true,
     persistCookiesPerSession: true,
     sessionPoolOptions: {
-        maxPoolSize: 20,
+        maxPoolSize: 10, // Reduced from 20
         sessionOptions: {
-            maxUsageCount: 15,
+            maxUsageCount: 10, // Reduced from 15
             maxErrorScore: 1,
         },
     },
@@ -448,14 +385,6 @@ const crawler = new CheerioCrawler({
 
         // ============= LIST PAGE HANDLER =============
         if (label === 'LIST') {
-            // NEW: Check if we've already processed this exact URL
-            const urlKey = `${request.url}_${page}`;
-            if (processedPages.has(urlKey)) {
-                crawlerLog.warning(`Already processed this page: ${urlKey}`);
-                return;
-            }
-            processedPages.add(urlKey);
-            
             crawlerLog.info(`Scraping listing page ${page}: ${request.url}`);
             
             const pageTitle = $('title').text();
@@ -472,19 +401,16 @@ const crawler = new CheerioCrawler({
 
             // METHOD 1: Try to extract JSON-LD first (most reliable)
             const jsonLdJobs = extractJsonLd($, crawlerLog);
-            let newJobsFromJsonLd = 0;
             
             if (jsonLdJobs.length > 0) {
                 crawlerLog.info(`Found ${jsonLdJobs.length} jobs in JSON-LD data`);
                 
+                let jobsToSave = 0;
                 for (const job of jsonLdJobs) {
                     if (jobsScraped >= RESULTS_WANTED) break;
                     
                     const jobUrl = job.url || job['@id'] || job.identifier?.value;
-                    if (!jobUrl || scrapedUrls.has(jobUrl)) {
-                        crawlerLog.debug(`Skipping duplicate job: ${jobUrl}`);
-                        continue;
-                    }
+                    if (!jobUrl || scrapedUrls.has(jobUrl)) continue;
                     
                     scrapedUrls.add(jobUrl);
                     
@@ -516,96 +442,68 @@ const crawler = new CheerioCrawler({
                     
                     await Dataset.pushData(jobData);
                     jobsScraped++;
-                    newJobsFromJsonLd++;
+                    jobsToSave++;
                     crawlerLog.info(`[${jobsScraped}/${RESULTS_WANTED}] ${jobData.title}`);
                 }
                 
-                crawlerLog.info(`Added ${newJobsFromJsonLd} new jobs from JSON-LD on page ${page}`);
+                if (jobsToSave > 0) {
+                    crawlerLog.info(`Saved ${jobsToSave} jobs from JSON-LD`);
+                }
             }
 
             // METHOD 2: Extract job URLs and enqueue detail pages
             const jobUrls = extractJobUrls($, crawlerLog);
-            crawlerLog.info(`Found ${jobUrls.length} job URLs on page ${page}`);
+            crawlerLog.info(`Found ${jobUrls.length} job URLs on page`);
             
-            // NEW: More detailed logging about job discovery
             if (jobUrls.length === 0 && jsonLdJobs.length === 0) {
-                crawlerLog.warning(`No jobs found on page ${page}! Possible causes:`);
-                crawlerLog.warning('  - Reached end of results');
+                crawlerLog.warning('No jobs found! Possible causes:');
                 crawlerLog.warning('  - Site structure changed');
                 crawlerLog.warning('  - Being blocked (try proxy)');
-                
-                // Check if this looks like an empty results page
-                const noResultsIndicators = [
-                    'no jobs found', 'no results', '0 jobs', 'try different', 
-                    'broaden your search', 'no matches'
-                ];
-                const lowerBodyText = bodyText.substring(0, 2000);
-                const seemsEmpty = noResultsIndicators.some(indicator => 
-                    lowerBodyText.includes(indicator)
-                );
-                
-                if (seemsEmpty) {
-                    crawlerLog.info('This appears to be an empty results page - stopping pagination');
-                    return;
-                }
+                crawlerLog.warning('  - Search returned no results');
+                crawlerLog.info(`HTML sample: ${$('body').html()?.substring(0, 500)}`);
+                return;
             }
 
-            // Enqueue job detail pages (up to our limit)
+            // Enqueue job detail pages (up to our limit) - CONSERVATIVE APPROACH
             const urlsToEnqueue = [];
             for (const url of jobUrls) {
                 if (jobsScraped + urlsToEnqueue.length >= RESULTS_WANTED) break;
                 if (!scrapedUrls.has(url)) {
                     urlsToEnqueue.push(url);
-                    scrapedUrls.add(url); // NEW: Add to scraped URLs immediately to prevent duplicates
                 }
             }
 
             if (urlsToEnqueue.length > 0) {
-                crawlerLog.info(`Enqueueing ${urlsToEnqueue.length} detail pages from page ${page}`);
+                crawlerLog.info(`Enqueueing ${urlsToEnqueue.length} detail pages`);
                 await enqueueLinks({
                     urls: urlsToEnqueue,
                     userData: { label: 'DETAIL' },
                 });
             }
 
-            // PAGINATION - ENHANCED LOGIC
-            const totalJobsOnPage = newJobsFromJsonLd + urlsToEnqueue.length;
-            crawlerLog.info(`Total jobs found on page ${page}: ${totalJobsOnPage} (${newJobsFromJsonLd} from JSON-LD, ${urlsToEnqueue.length} for detail scraping)`);
+            // PAGINATION - SIMPLIFIED BUT IMPROVED LOGIC
+            const totalJobsFound = jsonLdJobs.length + jobUrls.length;
             
-            const shouldContinue = jobsScraped < RESULTS_WANTED && 
-                                 page < MAX_PAGES && 
-                                 totalJobsOnPage > 0; // NEW: Only continue if we found jobs
-            
-            if (shouldContinue) {
+            // Only continue pagination if:
+            // 1. We haven't reached our target
+            // 2. We haven't hit max pages
+            // 3. We found jobs on this page (indicating more might exist)
+            if (jobsScraped < RESULTS_WANTED && page < MAX_PAGES && totalJobsFound > 0) {
                 const nextUrl = findNextPageUrl($, request.url, page, crawlerLog);
                 
                 if (nextUrl && nextUrl !== request.url) {
-                    // NEW: Additional validation to ensure next URL is different
-                    const currentUrlBase = request.url.split('?')[0];
-                    const nextUrlBase = nextUrl.split('?')[0];
-                    const urlsAreDifferent = nextUrl !== request.url && 
-                                           !processedPages.has(`${nextUrl}_${page + 1}`);
-                    
-                    if (urlsAreDifferent) {
-                        crawlerLog.info(`Proceeding to page ${page + 1}: ${nextUrl}`);
-                        await enqueueLinks({
-                            urls: [nextUrl],
-                            userData: { label: 'LIST', page: page + 1 },
-                        });
-                    } else {
-                        crawlerLog.warning(`Next URL is same as current or already processed: ${nextUrl}`);
-                    }
+                    crawlerLog.info(`Next page found: ${page + 1}`);
+                    await enqueueLinks({
+                        urls: [nextUrl],
+                        userData: { label: 'LIST', page: page + 1 },
+                    });
                 } else {
-                    crawlerLog.info(`No more pages found after page ${page} (or reached end of results)`);
+                    crawlerLog.info('No more pages to scrape');
                 }
-            } else {
-                if (jobsScraped >= RESULTS_WANTED) {
-                    crawlerLog.info(`Target reached: ${RESULTS_WANTED} jobs`);
-                } else if (page >= MAX_PAGES) {
-                    crawlerLog.info(`Max pages limit reached: ${MAX_PAGES}`);
-                } else if (totalJobsOnPage === 0) {
-                    crawlerLog.info('No more jobs found - reached end of results');
-                }
+            } else if (page >= MAX_PAGES) {
+                crawlerLog.info(`Max pages limit reached: ${MAX_PAGES}`);
+            } else if (totalJobsFound === 0) {
+                crawlerLog.info('No jobs found on this page - might have reached end');
             }
         }
 
