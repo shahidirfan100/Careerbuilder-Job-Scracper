@@ -1,0 +1,64 @@
+{
+  "title": "CareerBuilder Job Listing",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "Job title",
+      "editor": "textfield"
+    },
+    "company": {
+      "type": "string",
+      "description": "Company name",
+      "editor": "textfield"
+    },
+    "location": {
+      "type": "string",
+      "description": "Job location",
+      "editor": "textfield"
+    },
+    "date_posted": {
+      "type": "string",
+      "description": "Date when the job was posted",
+      "editor": "textfield"
+    },
+    "salary": {
+      "type": "string",
+      "description": "Salary information",
+      "editor": "textfield"
+    },
+    "job_type": {
+      "type": "string",
+      "description": "Employment type (full-time, part-time, etc.)",
+      "editor": "textfield"
+    },
+    "description_text": {
+      "type": "string",
+      "description": "Job description in plain text",
+      "editor": "textarea"
+    },
+    "description_html": {
+      "type": "string",
+      "description": "Job description in HTML format",
+      "editor": "textarea"
+    },
+    "url": {
+      "type": "string",
+      "description": "URL of the job posting",
+      "editor": "textfield"
+    },
+    "scraped_at": {
+      "type": "string",
+      "description": "Timestamp when the job was scraped",
+      "editor": "textfield",
+      "format": "date-time"
+    },
+    "source": {
+      "type": "string",
+      "description": "Data extraction method used",
+      "editor": "textfield"
+    }
+  },
+  "required": ["title", "company", "url"]
+}

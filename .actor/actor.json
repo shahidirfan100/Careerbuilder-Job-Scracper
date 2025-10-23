@@ -1,10 +1,58 @@
 {
   "actorSpecification": 1,
-  "name": "careerbuilder-jobs-scraper",
-  "version": "1.0.0",
-  "buildTag": "latest",
-  "dockerfile": "./Dockerfile",
-  "readme": "../README.md",
+  "name": "careerbuilder-job-scraper",
+  "title": "CareerBuilder Job Scraper",
+  "description": "Scrape job listings from CareerBuilder with advanced filters. Extract job titles, companies, locations, salaries, descriptions, and more.",
+  "version": "1.0",
+  "meta": {
+    "templateId": "javascript-cheerio"
+  },
   "input": "./input_schema.json",
-  "nodeJsVersion": "22"
+  "storages": {
+    "dataset": {
+      "actorSpecification": 1,
+      "title": "CareerBuilder Jobs",
+      "views": {
+        "overview": {
+          "title": "Overview",
+          "transformation": {
+            "fields": [
+              "title",
+              "company",
+              "location",
+              "date_posted",
+              "salary",
+              "job_type",
+              "url"
+            ]
+          },
+          "display": {
+            "component": "table",
+            "properties": {
+              "title": {
+                "label": "Job Title",
+                "format": "text"
+              },
+              "company": {
+                "label": "Company",
+                "format": "text"
+              },
+              "location": {
+                "label": "Location",
+                "format": "text"
+              },
+              "salary": {
+                "label": "Salary",
+                "format": "text"
+              },
+              "url": {
+                "label": "URL",
+                "format": "link"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }

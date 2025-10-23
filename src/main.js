@@ -2,7 +2,13 @@ import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
 
 // ------------------------- INITIALIZATION -------------------------
-await Actor.init();
+try {
+    await Actor.init();
+    log.info('Actor initialized successfully');
+} catch (error) {
+    log.error('Failed to initialize Actor', { error: error.message });
+    process.exit(1);
+}
 
 // ------------------------- INPUT -------------------------
 const input = await Actor.getInput() ?? {};
@@ -15,13 +21,32 @@ const {
     startUrl,
     cookies,
     cookiesJson,
-    proxyConfiguration,
+    proxyConfiguration = { useApifyProxy: true },
 } = input;
 
 const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : Number.MAX_SAFE_INTEGER;
 const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 20;
 
+// Validate input
+if (!startUrl && !keyword && !location) {
+    log.warning('No search parameters provided. Using default job search.');
+}
+
 // ------------------------- HELPERS -------------------------
+// Human-like delay with random variation
+const humanDelay = async (min = 1000, max = 3000) => {
+    const delay = Math.floor(Math.random() * (max - min + 1)) + min;
+    await new Promise(resolve => setTimeout(resolve, delay));
+};
+
+// Exponential backoff with jitter
+const exponentialBackoff = (attempt) => {
+    const base = 1000;
+    const maxDelay = 30000;
+    const jitter = Math.random() * 1000;
+    return Math.min(base * Math.pow(2, attempt) + jitter, maxDelay);
+};
+
 const buildStartUrl = (kw, loc, date) => {
     const url = new URL('https://www.careerbuilder.com/jobs');
     
@@ -303,47 +328,72 @@ const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
 };
 
 // ------------------------- PROXY & CRAWLER -------------------------
-const proxyConf = proxyConfiguration
-    ? await Actor.createProxyConfiguration(proxyConfiguration)
-    : undefined;
+const proxyConf = await Actor.createProxyConfiguration(proxyConfiguration);
 
 let jobsScraped = 0;
 const scrapedUrls = new Set();
+let requestCount = 0;
+let pageCount = 0;
+
+// Generate realistic user agents
+const userAgents = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+];
+
+const getRandomUserAgent = () => userAgents[Math.floor(Math.random() * userAgents.length)];
 
 const crawler = new CheerioCrawler({
     proxyConfiguration: proxyConf,
-    maxRequestsPerMinute: 60,
-    requestHandlerTimeoutSecs: 120,
-    navigationTimeoutSecs: 120,
-    maxConcurrency: 3,
+    maxRequestsPerMinute: 30, // Lower for more natural pacing
+    requestHandlerTimeoutSecs: 180,
+    navigationTimeoutSecs: 180,
+    maxConcurrency: 2, // Lower concurrency for stealth
+    maxRequestRetries: 5,
     useSessionPool: true,
     persistCookiesPerSession: true,
     sessionPoolOptions: {
-        maxPoolSize: 20,
+        maxPoolSize: 10,
         sessionOptions: {
-            maxUsageCount: 15,
-            maxErrorScore: 1,
+            maxUsageCount: 10,
+            maxErrorScore: 2,
         },
     },
     
     preNavigationHooks: [
-        ({ request }) => {
+        async ({ request, session }) => {
+            // Increment request counter
+            requestCount++;
+            
+            // Add human-like delay between requests
+            if (requestCount > 1) {
+                await humanDelay(2000, 5000);
+            }
+            
+            const ua = getRandomUserAgent();
+            const chromeVersion = ua.match(/Chrome\/(\d+)/)?.[1] || '131';
+            
             request.headers = {
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache',
-                'Sec-Ch-Ua': '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
+                'Cache-Control': 'max-age=0',
+                'Sec-Ch-Ua': `"Chromium";v="${chromeVersion}", "Google Chrome";v="${chromeVersion}", "Not?A_Brand";v="99"`,
                 'Sec-Ch-Ua-Mobile': '?0',
                 'Sec-Ch-Ua-Platform': '"Windows"',
                 'Sec-Fetch-Dest': 'document',
                 'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-Site': request.userData.referer ? 'same-origin' : 'none',
                 'Sec-Fetch-User': '?1',
                 'Upgrade-Insecure-Requests': '1',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                'User-Agent': ua,
             };
+            
+            // Add referer for natural navigation
+            if (request.userData.referer) {
+                request.headers.Referer = request.userData.referer;
+            }
             
             const cookieHeader = normalizeCookieHeader({ cookies, cookiesJson });
             if (cookieHeader) {
@@ -355,31 +405,35 @@ const crawler = new CheerioCrawler({
     async requestHandler({ request, $, enqueueLinks, log: crawlerLog, session }) {
         const { label = 'LIST', page = 1 } = request.userData;
 
+        // Add reading delay to simulate human behavior
+        await humanDelay(500, 1500);
+
         if (jobsScraped >= RESULTS_WANTED) {
-            crawlerLog.info(`Target reached: ${RESULTS_WANTED} jobs scraped`);
+            crawlerLog.info(`✅ Target reached: ${RESULTS_WANTED} jobs scraped`);
             return;
         }
 
         // ============= LIST PAGE HANDLER =============
         if (label === 'LIST') {
-            crawlerLog.info(`Scraping listing page ${page}: ${request.url}`);
+            pageCount++;
+            crawlerLog.info(`📄 Scraping listing page ${page} (Page count: ${pageCount}/${MAX_PAGES}): ${request.url}`);
             
             const pageTitle = $('title').text();
-            crawlerLog.info(`Page title: "${pageTitle}"`);
+            crawlerLog.debug(`Page title: "${pageTitle}"`);
             
             // Check for blocking
             const bodyText = $('body').text().toLowerCase();
             if (bodyText.includes('access denied') || bodyText.includes('captcha') || 
                 bodyText.includes('security check') || bodyText.includes('blocked')) {
-                crawlerLog.error('BLOCKED! Enable proxy configuration or add cookies');
+                crawlerLog.error('🚫 BLOCKED! Rotating session...');
                 session.retire();
-                return;
+                throw new Error('Access blocked - session retired');
             }
 
             // METHOD 1: Try to extract JSON-LD first (most reliable)
             const jsonLdJobs = extractJsonLd($, crawlerLog);
             if (jsonLdJobs.length > 0) {
-                crawlerLog.info(`Found ${jsonLdJobs.length} jobs in JSON-LD data`);
+                crawlerLog.info(`📊 Found ${jsonLdJobs.length} jobs in JSON-LD data`);
                 
                 let jobsToSave = 0;
                 for (const job of jsonLdJobs) {
@@ -390,7 +444,6 @@ const crawler = new CheerioCrawler({
                     
                     scrapedUrls.add(jobUrl);
                     
-                    // NEW: Clean the description if it contains HTML
                     let descriptionHtml = job.description || '';
                     let descriptionText = job.description || '';
                     
@@ -419,24 +472,20 @@ const crawler = new CheerioCrawler({
                     await Dataset.pushData(jobData);
                     jobsScraped++;
                     jobsToSave++;
-                    crawlerLog.info(`[${jobsScraped}/${RESULTS_WANTED}] ${jobData.title}`);
+                    crawlerLog.info(`✅ [${jobsScraped}/${RESULTS_WANTED}] ${jobData.title} at ${jobData.company}`);
                 }
                 
                 if (jobsToSave > 0) {
-                    crawlerLog.info(`Saved ${jobsToSave} jobs from JSON-LD`);
+                    crawlerLog.info(`💾 Saved ${jobsToSave} jobs from JSON-LD`);
                 }
             }
 
             // METHOD 2: Extract job URLs and enqueue detail pages
             const jobUrls = extractJobUrls($, crawlerLog);
-            crawlerLog.info(`Found ${jobUrls.length} job URLs on page`);
+            crawlerLog.info(`🔗 Found ${jobUrls.length} job URLs on page`);
             
             if (jobUrls.length === 0 && jsonLdJobs.length === 0) {
-                crawlerLog.warning('No jobs found! Possible causes:');
-                crawlerLog.warning('  - Site structure changed');
-                crawlerLog.warning('  - Being blocked (try proxy)');
-                crawlerLog.warning('  - Search returned no results');
-                crawlerLog.info(`HTML sample: ${$('body').html()?.substring(0, 500)}`);
+                crawlerLog.warning('⚠️ No jobs found on this page!');
                 return;
             }
 
@@ -450,51 +499,58 @@ const crawler = new CheerioCrawler({
             }
 
             if (urlsToEnqueue.length > 0) {
-                crawlerLog.info(`Enqueueing ${urlsToEnqueue.length} detail pages`);
+                crawlerLog.info(`➕ Enqueueing ${urlsToEnqueue.length} detail pages`);
                 await enqueueLinks({
                     urls: urlsToEnqueue,
-                    userData: { label: 'DETAIL' },
+                    userData: { 
+                        label: 'DETAIL',
+                        referer: request.url 
+                    },
                 });
             }
 
             // PAGINATION
-            if (jobsScraped < RESULTS_WANTED && page < MAX_PAGES) {
+            if (jobsScraped < RESULTS_WANTED && pageCount < MAX_PAGES) {
                 const nextUrl = findNextPageUrl($, request.url, page, crawlerLog);
                 
                 if (nextUrl && nextUrl !== request.url) {
-                    crawlerLog.info(`Next page found: ${page + 1}`);
+                    crawlerLog.info(`➡️ Next page found: ${page + 1}`);
+                    await humanDelay(3000, 6000); // Longer delay before next page
                     await enqueueLinks({
                         urls: [nextUrl],
-                        userData: { label: 'LIST', page: page + 1 },
+                        userData: { 
+                            label: 'LIST', 
+                            page: page + 1,
+                            referer: request.url 
+                        },
                     });
                 } else {
-                    crawlerLog.info('No more pages to scrape');
+                    crawlerLog.info('🏁 No more pages to scrape');
                 }
-            } else if (page >= MAX_PAGES) {
-                crawlerLog.info(`Max pages limit reached: ${MAX_PAGES}`);
+            } else if (pageCount >= MAX_PAGES) {
+                crawlerLog.info(`🛑 Max pages limit reached: ${MAX_PAGES}`);
             }
         }
 
         // ============= DETAIL PAGE HANDLER =============
         if (label === 'DETAIL') {
             if (jobsScraped >= RESULTS_WANTED) {
-                crawlerLog.info(`Skipping (limit reached): ${request.url}`);
+                crawlerLog.debug(`Skipping (limit reached): ${request.url}`);
                 return;
             }
 
             if (scrapedUrls.has(request.url)) {
-                crawlerLog.info(`Already scraped: ${request.url}`);
+                crawlerLog.debug(`Already scraped: ${request.url}`);
                 return;
             }
 
-            crawlerLog.info(`Scraping job detail: ${request.url}`);
+            crawlerLog.info(`📝 Scraping job detail: ${request.url}`);
             
             // Try JSON-LD first
             const jsonLdJobs = extractJsonLd($, crawlerLog);
             if (jsonLdJobs.length > 0) {
                 const job = jsonLdJobs[0];
                 
-                // NEW: Clean the description if it contains HTML
                 let descriptionHtml = job.description || '';
                 let descriptionText = job.description || '';
                 
@@ -523,7 +579,7 @@ const crawler = new CheerioCrawler({
                 scrapedUrls.add(request.url);
                 await Dataset.pushData(jobData);
                 jobsScraped++;
-                crawlerLog.info(`[${jobsScraped}/${RESULTS_WANTED}] ${jobData.title}`);
+                crawlerLog.info(`✅ [${jobsScraped}/${RESULTS_WANTED}] ${jobData.title} at ${jobData.company}`);
                 return;
             }
 
@@ -532,8 +588,7 @@ const crawler = new CheerioCrawler({
                          $('[class*="title"]').first().text().trim();
 
             if (!title) {
-                crawlerLog.warning(`Could not extract title from ${request.url}`);
-                session.retire();
+                crawlerLog.warning(`⚠️ Could not extract title from ${request.url}`);
                 return;
             }
 
@@ -549,7 +604,6 @@ const crawler = new CheerioCrawler({
                               $('[class*="posted"]').first().text().trim() ||
                               'Not specified';
 
-            // NEW: Use cleaning functions for HTML fallback
             let $descElement = $('#jdp_description').first();
             if ($descElement.length === 0) {
                 $descElement = $('[class*="description"]').first();
@@ -578,13 +632,15 @@ const crawler = new CheerioCrawler({
             scrapedUrls.add(request.url);
             await Dataset.pushData(jobData);
             jobsScraped++;
-            crawlerLog.info(`[${jobsScraped}/${RESULTS_WANTED}] ${title}`);
+            crawlerLog.info(`✅ [${jobsScraped}/${RESULTS_WANTED}] ${title} at ${company}`);
         }
     },
 
     failedRequestHandler: async ({ request }, error) => {
-        log.error(`Request failed: ${request.url}`);
-        log.error(`Error: ${error.message}`);
+        log.error(`❌ Request failed: ${request.url}`, { error: error.message });
+        
+        // Don't count failed requests towards our limit
+        if (requestCount > 0) requestCount--;
     },
 });
 
@@ -594,49 +650,56 @@ let initialUrl;
 if (startUrl) {
     initialUrl = normalizeStartUrl(startUrl);
     if (!initialUrl) {
-        log.error('Invalid startUrl provided. Please provide a valid CareerBuilder URL.');
+        log.error('❌ Invalid startUrl provided. Please provide a valid CareerBuilder URL.');
         await Actor.exit();
     }
-    log.info('Using provided start URL (ignoring keyword/location parameters)');
+    log.info('🔗 Using provided start URL');
 } else if (keyword || location) {
     initialUrl = buildStartUrl(keyword, location, posted_date);
-    log.info('Building URL from keyword/location parameters');
+    log.info('🏗️ Building URL from keyword/location parameters');
 } else {
-    log.warning('No startUrl, keyword, or location provided. Using default CareerBuilder jobs page.');
+    log.info('🌐 Using default CareerBuilder jobs page');
     initialUrl = 'https://www.careerbuilder.com/jobs?cb_apply=false&radius=50&cb_veterans=false&cb_workhome=all';
 }
 
 log.info('==========================================');
-log.info('CareerBuilder Scraper Starting');
+log.info('🚀 CareerBuilder Scraper Starting');
 log.info('==========================================');
-log.info(`Target: ${RESULTS_WANTED} jobs`);
-log.info(`Max pages: ${MAX_PAGES}`);
-log.info(`Start URL: ${initialUrl}`);
-log.info(`Proxy: ${proxyConf ? 'ENABLED' : 'DISABLED (may cause blocking)'}`);
-log.info(`Cookies: ${cookies || cookiesJson ? 'PROVIDED' : 'NOT PROVIDED'}`);
+log.info(`🎯 Target: ${RESULTS_WANTED} jobs`);
+log.info(`📄 Max pages: ${MAX_PAGES}`);
+log.info(`🔗 Start URL: ${initialUrl}`);
+log.info(`🔒 Proxy: ${proxyConf ? 'ENABLED ✅' : 'DISABLED ❌'}`);
+log.info(`🍪 Cookies: ${cookies || cookiesJson ? 'PROVIDED ✅' : 'NOT PROVIDED'}`);
 log.info('==========================================');
 
-if (!proxyConf) {
-    log.warning('WARNING: No proxy configured! You may get blocked.');
-    log.warning('Enable "Apify Proxy" in input for best results.');
+try {
+    await crawler.run([{ 
+        url: initialUrl, 
+        userData: { 
+            label: 'LIST', 
+            page: 1 
+        } 
+    }]);
+
+    log.info('==========================================');
+    log.info('✅ Scraping Complete');
+    log.info(`📊 Successfully scraped: ${jobsScraped} jobs`);
+    log.info(`📄 Pages processed: ${pageCount}`);
+    log.info(`🔢 Total requests: ${requestCount}`);
+    log.info('==========================================');
+
+    if (jobsScraped === 0) {
+        log.error('==========================================');
+        log.error('❌ NO JOBS SCRAPED - TROUBLESHOOTING:');
+        log.error('==========================================');
+        log.error('1. ✓ Check if search parameters return results on website');
+        log.error('2. ✓ Try different keywords or locations');
+        log.error('3. ✓ Verify proxy configuration is working');
+        log.error('==========================================');
+    }
+} catch (error) {
+    log.error('Fatal error during scraping', { error: error.message, stack: error.stack });
+    throw error;
+} finally {
+    await Actor.exit();
 }
-
-await crawler.run([{ url: initialUrl, userData: { label: 'LIST', page: 1 } }]);
-
-log.info('==========================================');
-log.info(`Scraping Complete`);
-log.info(`Successfully scraped: ${jobsScraped} jobs`);
-log.info('==========================================');
-
-if (jobsScraped === 0) {
-    log.error('==========================================');
-    log.error('NO JOBS SCRAPED - TROUBLESHOOTING:');
-    log.error('==========================================');
-    log.error('1. Enable "Apify Proxy" in actor input');
-    log.error('2. Try adding custom cookies from your browser');
-    log.error('3. Check if your search parameters return results on website');
-    log.error('4. Try different keywords or locations');
-    log.error('==========================================');
-}
-
-await Actor.exit();

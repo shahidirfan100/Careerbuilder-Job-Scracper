@@ -1,91 +1,71 @@
 {
-  "title": "CareerBuilder Jobs Scraper",
-  "description": "Scrape jobs from CareerBuilder.com. Use either a direct CareerBuilder URL OR provide keyword/location. Supports pagination and extracts job details using JSON-LD structured data.",
+  "title": "CareerBuilder Job Scraper Input",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
-    "startUrl": {
-      "title": "Start URL (Option 1)",
-      "type": "string",
-      "description": "Direct CareerBuilder search URL. Example: https://www.careerbuilder.com/jobs-accounting-and-auditing-near-me?posted=1&radius=50&cb_apply=false. If provided, keyword/location will be ignored.",
-      "editor": "textfield",
-      "example": "https://www.careerbuilder.com/jobs-accounting-and-auditing-near-me?posted=1&radius=50&cb_apply=false&keywords=&location=&pay=&emp=&cb_veterans=false&cb_workhome=all"
-    },
     "keyword": {
-      "title": "Keyword (Option 2)",
+      "title": "Job Keywords",
       "type": "string",
-      "description": "Job search keyword(s). Examples: 'Software Developer', 'Accountant', 'Marketing Manager'. Only used if Start URL is not provided.",
+      "description": "Search for specific job titles or keywords (e.g., 'Software Engineer', 'Marketing Manager')",
       "editor": "textfield",
-      "example": "Software Developer"
+      "example": "Software Engineer"
     },
     "location": {
-      "title": "Location (Option 2)",
+      "title": "Location",
       "type": "string",
-      "description": "Geographic location. Examples: 'New York, NY', 'San Francisco, CA', 'Remote'. Only used if Start URL is not provided.",
+      "description": "City, state, or zip code (e.g., 'New York, NY' or '10001')",
       "editor": "textfield",
       "example": "New York, NY"
     },
     "posted_date": {
-      "title": "Posted Date Filter",
+      "title": "Posted Date",
       "type": "string",
-      "description": "Filter jobs by posting date. Note: Only applies when using keyword/location, not when using Start URL.",
-      "enum": [
-        "anytime",
-        "24h",
-        "7d",
-        "30d"
-      ],
+      "description": "Filter jobs by posting date",
+      "editor": "select",
       "default": "anytime",
-      "enumTitles": [
-        "Any time",
-        "Last 24 hours",
-        "Last 7 days",
-        "Last 30 days"
-      ],
-      "editor": "select"
+      "enum": ["anytime", "24h", "7d", "30d"],
+      "enumTitles": ["Anytime", "Last 24 hours", "Last 7 days", "Last 30 days"]
     },
     "results_wanted": {
-      "title": "Maximum Results",
+      "title": "Number of Jobs",
       "type": "integer",
-      "description": "Maximum number of jobs to scrape. Scraper stops when this limit is reached.",
-      "minimum": 1,
-      "default": 100,
+      "description": "Maximum number of jobs to scrape",
       "editor": "number",
-      "example": 100
+      "default": 100,
+      "minimum": 1,
+      "maximum": 10000,
+      "unit": "jobs"
     },
     "max_pages": {
       "title": "Maximum Pages",
       "type": "integer",
-      "description": "Maximum number of search result pages to visit. Safety limit to prevent excessive crawling.",
+      "description": "Maximum number of listing pages to process",
+      "editor": "number",
+      "default": 20,
       "minimum": 1,
       "maximum": 100,
-      "default": 20,
-      "editor": "number"
+      "unit": "pages"
+    },
+    "startUrl": {
+      "title": "Custom Start URL (Optional)",
+      "type": "string",
+      "description": "Provide a direct CareerBuilder search URL. This will override keyword/location settings.",
+      "editor": "textfield",
+      "pattern": "^https://www\\.careerbuilder\\.com/.*",
+      "example": "https://www.careerbuilder.com/jobs?keywords=developer&location=remote"
     },
     "proxyConfiguration": {
-      "title": "⚠️ REQUIRED: Proxy Configuration",
+      "title": "Proxy Configuration",
       "type": "object",
-      "description": "🚨 CRITICAL: Without proxy, you WILL be blocked! Use Apify Residential Proxy for best results. CareerBuilder has strong anti-bot protection.",
+      "description": "Use Apify Proxy to avoid being blocked (highly recommended)",
       "editor": "proxy",
+      "default": {
+        "useApifyProxy": true
+      },
       "prefill": {
-        "useApifyProxy": true,
-        "apifyProxyGroups": ["RESIDENTIAL"]
+        "useApifyProxy": true
       }
-    },
-    "cookies": {
-      "title": "🍪 Cookies (HIGHLY Recommended)",
-      "type": "string",
-      "description": "⚠️ IMPORTANT: For best results, add cookies from your browser. Format: 'cookie1=value1; cookie2=value2'. See documentation for how to get cookies. Without cookies, you may get blocked even with proxy!",
-      "editor": "textfield",
-      "sectionCaption": "Anti-Blocking Options (Critical for Success)"
-    },
-    "cookiesJson": {
-      "title": "Custom Cookies (JSON)",
-      "type": "string",
-      "description": "Optional: JSON-formatted cookies. Accepts array format: [{\"name\":\"cookie1\",\"value\":\"value1\"}] or object format: {\"cookie1\":\"value1\"}",
-      "editor": "textarea"
     }
   },
-  "required": [],
-  "additionalProperties": false
+  "required": []
 }
