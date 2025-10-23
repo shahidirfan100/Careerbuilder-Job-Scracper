@@ -1,41 +1,68 @@
 # CareerBuilder Job Scraper
 
-Fast and reliable scraper for CareerBuilder job listings. Extract job titles, companies, locations, salaries, descriptions, and more with advanced filtering options.
+Fast and reliable scraper for CareerBuilder job listings with advanced anti-blocking features.
 
-## Features
+## 🚀 Quick Start
 
-✅ Search by keywords and location  
-✅ Filter by posting date (24h, 7d, 30d)  
-✅ Extract complete job details including descriptions  
-✅ Stealth mode with proxy support  
-✅ Clean, structured data output  
-✅ Handles pagination automatically
+### Method 1: Direct URL (Recommended)
+1. Go to CareerBuilder.com and search for jobs
+2. Copy the URL from your browser
+3. Paste it in the "Direct Search URL" field
+4. Enable Apify Proxy (RESIDENTIAL)
+5. Run the scraper
 
-## Input Parameters
+### Method 2: Keyword Search
+1. Enter job keywords (e.g., "Software Engineer")
+2. Enter location (e.g., "New York, NY")
+3. Enable Apify Proxy (RESIDENTIAL)
+4. Run the scraper
 
-- **Job Keywords**: Search term (e.g., "Software Engineer")  
-- **Location**: City, state, or zip code (e.g., "New York, NY")  
-- **Posted Date**: Filter by when job was posted  
-- **Number of Jobs**: Maximum jobs to scrape (default: 100)  
-- **Maximum Pages**: Maximum listing pages to process (default: 20)  
-- **Custom Start URL**: Direct CareerBuilder search URL (optional)  
-- **Proxy Configuration**: Highly recommended to avoid blocking
+## 🔒 Important: Anti-Blocking
 
-## Output
+**REQUIRED:**
+- ✅ Enable Apify Proxy with RESIDENTIAL group
+- ✅ Use Direct URL method for best results
 
-Each job listing includes:  
-- Job title  
-- Company name  
-- Location  
-- Posting date  
-- Salary (if available)  
-- Job type  
-- Full description (text and HTML)  
-- Job URL  
-- Scraping timestamp
+**Optional but helps:**
+- 🍪 Add browser cookies if getting blocked
+- ⏱️ Use lower job counts (50-200) per run
+- 🔄 Run multiple times for large datasets
 
-## Tips
+## 📊 Output Fields
 
-- Enable Apify Proxy for best results  
-- Use specific keywords for better matches  
-- Adjust max_pages if you need more results
+- Job title
+- Company name
+- Location
+- Posted date
+- Salary (if available)
+- Job type
+- Full description (text + HTML)
+- Job URL
+- Timestamp
+
+## 💡 Tips
+
+1. **Use RESIDENTIAL proxy** - Datacenter proxies get blocked
+2. **Copy cookies from browser** if you see 403 errors
+3. **Use Direct URL** - More reliable than keyword search
+4. **Start with small numbers** - Test with 20-50 jobs first
+5. **Check CareerBuilder manually** - Make sure your search returns results
+
+## 🐛 Troubleshooting
+
+**403 Error / Access Denied:**
+- Enable RESIDENTIAL proxy (not datacenter)
+- Add cookies from your browser
+- Use Direct URL method
+- Try different search terms
+
+**No Results:**
+- Verify search works on CareerBuilder website
+- Check spelling of keywords/location
+- Try broader search terms
+- Use Direct URL from working search
+
+**Actor Stops Early:**
+- This is normal - CareerBuilder has rate limits
+- Run multiple times to collect more data
+- Reduce results_wanted to 50-100 per run

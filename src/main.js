@@ -21,7 +21,7 @@ const {
     startUrl,
     cookies,
     cookiesJson,
-    proxyConfiguration = { useApifyProxy: true },
+    proxyConfiguration = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] },
 } = input;
 
 const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : Number.MAX_SAFE_INTEGER;
@@ -29,21 +29,21 @@ const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) 
 
 // Validate input
 if (!startUrl && !keyword && !location) {
-    log.warning('No search parameters provided. Using default job search.');
+    log.warning('⚠️ No search parameters provided. Using default job search.');
 }
 
 // ------------------------- HELPERS -------------------------
 // Human-like delay with random variation
-const humanDelay = async (min = 1000, max = 3000) => {
+const humanDelay = async (min = 2000, max = 5000) => {
     const delay = Math.floor(Math.random() * (max - min + 1)) + min;
     await new Promise(resolve => setTimeout(resolve, delay));
 };
 
 // Exponential backoff with jitter
 const exponentialBackoff = (attempt) => {
-    const base = 1000;
-    const maxDelay = 30000;
-    const jitter = Math.random() * 1000;
+    const base = 2000;
+    const maxDelay = 60000;
+    const jitter = Math.random() * 2000;
     return Math.min(base * Math.pow(2, attempt) + jitter, maxDelay);
 };
 
@@ -63,13 +63,10 @@ const buildStartUrl = (kw, loc, date) => {
     // Add standard parameters
     url.searchParams.set('cb_apply', 'false');
     url.searchParams.set('radius', '50');
-    url.searchParams.set('cb_veterans', 'false');
-    url.searchParams.set('cb_workhome', 'all');
     
     return url.href;
 };
 
-// Parse and validate the start URL
 const normalizeStartUrl = (urlString) => {
     try {
         const url = new URL(urlString);
@@ -109,7 +106,7 @@ const normalizeCookieHeader = ({ cookies: rawCookies, cookiesJson: jsonCookies }
     return '';
 };
 
-// NEW: Clean description text - removes HTML and unwanted sections
+// Clean description text - removes HTML and unwanted sections
 const cleanDescriptionText = ($element) => {
     if (!$element || $element.length === 0) return '';
     
@@ -129,7 +126,7 @@ const cleanDescriptionText = ($element) => {
     return text.trim();
 };
 
-// NEW: Clean description HTML - keeps only job content, removes links
+// Clean description HTML - keeps only job content, removes links
 const cleanDescriptionHtml = ($element) => {
     if (!$element || $element.length === 0) return '';
     
@@ -328,60 +325,93 @@ const findNextPageUrl = ($, currentUrl, currentPage, crawlerLog) => {
 };
 
 // ------------------------- PROXY & CRAWLER -------------------------
+log.info('🔧 Configuring proxy...');
 const proxyConf = await Actor.createProxyConfiguration(proxyConfiguration);
+
+// Test proxy configuration
+if (proxyConf) {
+    try {
+        const proxyUrl = await proxyConf.newUrl();
+        log.info(`✅ Proxy configured: ${proxyUrl.replace(/:[^:]*@/, ':***@')}`);
+    } catch (e) {
+        log.warning('⚠️ Proxy configuration warning:', { error: e.message });
+    }
+}
 
 let jobsScraped = 0;
 const scrapedUrls = new Set();
 let requestCount = 0;
 let pageCount = 0;
+let retryAttempt = 0;
+let failedRequests = 0;
+const MAX_FAILED_REQUESTS = 10;
 
-// Generate realistic user agents
+// Enhanced user agents with realistic fingerprints
 const userAgents = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15'
 ];
 
 const getRandomUserAgent = () => userAgents[Math.floor(Math.random() * userAgents.length)];
 
+// Enhanced viewport sizes for fingerprint diversity
+const viewports = [
+    { width: 1920, height: 1080 },
+    { width: 1366, height: 768 },
+    { width: 1536, height: 864 },
+    { width: 1440, height: 900 }
+];
+
+const getRandomViewport = () => viewports[Math.floor(Math.random() * viewports.length)];
+
 const crawler = new CheerioCrawler({
     proxyConfiguration: proxyConf,
-    maxRequestsPerMinute: 30, // Lower for more natural pacing
-    requestHandlerTimeoutSecs: 180,
-    navigationTimeoutSecs: 180,
-    maxConcurrency: 2, // Lower concurrency for stealth
-    maxRequestRetries: 5,
+    maxRequestsPerMinute: 15, // Very conservative for stealth
+    maxRequestsPerCrawl: RESULTS_WANTED * 3, // Allow more requests than jobs needed
+    requestHandlerTimeoutSecs: 300,
+    navigationTimeoutSecs: 300,
+    maxConcurrency: 1, // Single thread for maximum stealth
+    maxRequestRetries: 10,
     useSessionPool: true,
     persistCookiesPerSession: true,
     sessionPoolOptions: {
-        maxPoolSize: 10,
+        maxPoolSize: 3,
         sessionOptions: {
-            maxUsageCount: 10,
-            maxErrorScore: 2,
+            maxUsageCount: 8,
+            maxErrorScore: 5,
         },
     },
     
     preNavigationHooks: [
-        async ({ request, session }) => {
-            // Increment request counter
+        async ({ request, session, crawler: crawlerInstance }) => {
             requestCount++;
             
-            // Add human-like delay between requests
+            // Progressive delays - longer waits as we scrape more
+            const baseDelay = Math.min(3000 + (requestCount * 100), 10000);
             if (requestCount > 1) {
-                await humanDelay(2000, 5000);
+                await humanDelay(baseDelay, baseDelay + 3000);
             }
             
             const ua = getRandomUserAgent();
             const chromeVersion = ua.match(/Chrome\/(\d+)/)?.[1] || '131';
+            const viewport = getRandomViewport();
             
+            // Enhanced headers with complete fingerprint
             request.headers = {
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Accept-Encoding': 'gzip, deflate, br, zstd',
                 'Cache-Control': 'max-age=0',
+                'Connection': 'keep-alive',
                 'Sec-Ch-Ua': `"Chromium";v="${chromeVersion}", "Google Chrome";v="${chromeVersion}", "Not?A_Brand";v="99"`,
                 'Sec-Ch-Ua-Mobile': '?0',
                 'Sec-Ch-Ua-Platform': '"Windows"',
+                'Sec-Ch-Ua-Platform-Version': '"15.0.0"',
+                'Sec-Ch-Ua-Full-Version-List': `"Chromium";v="${chromeVersion}.0.6723.117", "Google Chrome";v="${chromeVersion}.0.6723.117", "Not?A_Brand";v="99.0.0.0"`,
+                'Sec-Ch-Viewport-Width': String(viewport.width),
                 'Sec-Fetch-Dest': 'document',
                 'Sec-Fetch-Mode': 'navigate',
                 'Sec-Fetch-Site': request.userData.referer ? 'same-origin' : 'none',
@@ -390,23 +420,26 @@ const crawler = new CheerioCrawler({
                 'User-Agent': ua,
             };
             
-            // Add referer for natural navigation
+            // Add referer chain for natural navigation
             if (request.userData.referer) {
                 request.headers.Referer = request.userData.referer;
             }
             
+            // Add cookies
             const cookieHeader = normalizeCookieHeader({ cookies, cookiesJson });
             if (cookieHeader) {
                 request.headers.Cookie = cookieHeader;
             }
+            
+            log.debug(`🌐 Request #${requestCount}: ${request.url.substring(0, 60)}...`);
         },
     ],
 
     async requestHandler({ request, $, enqueueLinks, log: crawlerLog, session }) {
         const { label = 'LIST', page = 1 } = request.userData;
 
-        // Add reading delay to simulate human behavior
-        await humanDelay(500, 1500);
+        // Simulate reading time
+        await humanDelay(1500, 4000);
 
         if (jobsScraped >= RESULTS_WANTED) {
             crawlerLog.info(`✅ Target reached: ${RESULTS_WANTED} jobs scraped`);
@@ -416,24 +449,45 @@ const crawler = new CheerioCrawler({
         // ============= LIST PAGE HANDLER =============
         if (label === 'LIST') {
             pageCount++;
-            crawlerLog.info(`📄 Scraping listing page ${page} (Page count: ${pageCount}/${MAX_PAGES}): ${request.url}`);
+            crawlerLog.info(`📄 LIST Page ${page} (Total pages: ${pageCount}/${MAX_PAGES}, Jobs: ${jobsScraped}/${RESULTS_WANTED})`);
             
             const pageTitle = $('title').text();
             crawlerLog.debug(`Page title: "${pageTitle}"`);
             
-            // Check for blocking
+            // Enhanced blocking detection
             const bodyText = $('body').text().toLowerCase();
-            if (bodyText.includes('access denied') || bodyText.includes('captcha') || 
-                bodyText.includes('security check') || bodyText.includes('blocked')) {
-                crawlerLog.error('🚫 BLOCKED! Rotating session...');
+            const bodyHtml = $('body').html() || '';
+            
+            const blockingIndicators = [
+                'access denied', 'captcha', 'security check', 'blocked',
+                'cf-error', 'cloudflare', 'ray id', 'checking your browser',
+                'enable javascript', 'enable cookies', 'unusual traffic',
+                'automated', 'bot', 'please verify'
+            ];
+            
+            const isBlocked = blockingIndicators.some(indicator => 
+                bodyText.includes(indicator) || bodyHtml.toLowerCase().includes(indicator)
+            );
+            
+            if (isBlocked) {
+                crawlerLog.error('🚫 BLOCKING DETECTED! Rotating session and backing off...');
                 session.retire();
+                await humanDelay(10000, 20000); // Long delay before retry
                 throw new Error('Access blocked - session retired');
             }
+            
+            // Check content validity
+            if (bodyHtml.length < 1000) {
+                crawlerLog.warning('⚠️ Page content too short, possible issue');
+                crawlerLog.debug(`Body length: ${bodyHtml.length} chars`);
+                session.retire();
+                throw new Error('Insufficient page content');
+            }
 
-            // METHOD 1: Try to extract JSON-LD first (most reliable)
+            // METHOD 1: Extract from JSON-LD (most reliable and efficient)
             const jsonLdJobs = extractJsonLd($, crawlerLog);
             if (jsonLdJobs.length > 0) {
-                crawlerLog.info(`📊 Found ${jsonLdJobs.length} jobs in JSON-LD data`);
+                crawlerLog.info(`📊 Found ${jsonLdJobs.length} jobs in JSON-LD`);
                 
                 let jobsToSave = 0;
                 for (const job of jsonLdJobs) {
@@ -472,7 +526,7 @@ const crawler = new CheerioCrawler({
                     await Dataset.pushData(jobData);
                     jobsScraped++;
                     jobsToSave++;
-                    crawlerLog.info(`✅ [${jobsScraped}/${RESULTS_WANTED}] ${jobData.title} at ${jobData.company}`);
+                    crawlerLog.info(`✅ [${jobsScraped}/${RESULTS_WANTED}] ${jobData.title} @ ${jobData.company}`);
                 }
                 
                 if (jobsToSave > 0) {
@@ -480,16 +534,19 @@ const crawler = new CheerioCrawler({
                 }
             }
 
-            // METHOD 2: Extract job URLs and enqueue detail pages
+            // METHOD 2: Extract job URLs for detail scraping (fallback)
             const jobUrls = extractJobUrls($, crawlerLog);
             crawlerLog.info(`🔗 Found ${jobUrls.length} job URLs on page`);
             
             if (jobUrls.length === 0 && jsonLdJobs.length === 0) {
                 crawlerLog.warning('⚠️ No jobs found on this page!');
+                crawlerLog.debug(`Body length: ${bodyHtml.length} chars`);
+                crawlerLog.debug(`HTML sample: ${bodyHtml.substring(0, 500)}...`);
+                // Don't fail, just continue to next page
                 return;
             }
 
-            // Enqueue job detail pages (up to our limit)
+            // Enqueue detail pages only if needed
             const urlsToEnqueue = [];
             for (const url of jobUrls) {
                 if (jobsScraped + urlsToEnqueue.length >= RESULTS_WANTED) break;
@@ -509,13 +566,14 @@ const crawler = new CheerioCrawler({
                 });
             }
 
-            // PAGINATION
+            // PAGINATION - Continue if we haven't reached target
             if (jobsScraped < RESULTS_WANTED && pageCount < MAX_PAGES) {
                 const nextUrl = findNextPageUrl($, request.url, page, crawlerLog);
                 
                 if (nextUrl && nextUrl !== request.url) {
-                    crawlerLog.info(`➡️ Next page found: ${page + 1}`);
-                    await humanDelay(3000, 6000); // Longer delay before next page
+                    crawlerLog.info(`➡️ Moving to page ${page + 1}`);
+                    // Longer delay between pages
+                    await humanDelay(8000, 15000);
                     await enqueueLinks({
                         urls: [nextUrl],
                         userData: { 
@@ -525,10 +583,12 @@ const crawler = new CheerioCrawler({
                         },
                     });
                 } else {
-                    crawlerLog.info('🏁 No more pages to scrape');
+                    crawlerLog.info('🏁 No more pages found');
                 }
             } else if (pageCount >= MAX_PAGES) {
                 crawlerLog.info(`🛑 Max pages limit reached: ${MAX_PAGES}`);
+            } else {
+                crawlerLog.info(`🎯 Target jobs reached: ${jobsScraped}/${RESULTS_WANTED}`);
             }
         }
 
@@ -544,7 +604,14 @@ const crawler = new CheerioCrawler({
                 return;
             }
 
-            crawlerLog.info(`📝 Scraping job detail: ${request.url}`);
+            crawlerLog.info(`📝 DETAIL: ${request.url.substring(0, 80)}...`);
+            
+            // Check for blocking on detail pages too
+            const bodyHtml = $('body').html() || '';
+            if (bodyHtml.length < 500) {
+                crawlerLog.warning('⚠️ Detail page too short');
+                return;
+            }
             
             // Try JSON-LD first
             const jsonLdJobs = extractJsonLd($, crawlerLog);
@@ -579,11 +646,11 @@ const crawler = new CheerioCrawler({
                 scrapedUrls.add(request.url);
                 await Dataset.pushData(jobData);
                 jobsScraped++;
-                crawlerLog.info(`✅ [${jobsScraped}/${RESULTS_WANTED}] ${jobData.title} at ${jobData.company}`);
+                crawlerLog.info(`✅ [${jobsScraped}/${RESULTS_WANTED}] ${jobData.title} @ ${jobData.company}`);
                 return;
             }
 
-            // Fallback to HTML scraping if JSON-LD not available
+            // Fallback to HTML scraping
             const title = $('h1').first().text().trim() ||
                          $('[class*="title"]').first().text().trim();
 
@@ -632,15 +699,29 @@ const crawler = new CheerioCrawler({
             scrapedUrls.add(request.url);
             await Dataset.pushData(jobData);
             jobsScraped++;
-            crawlerLog.info(`✅ [${jobsScraped}/${RESULTS_WANTED}] ${title} at ${company}`);
+            crawlerLog.info(`✅ [${jobsScraped}/${RESULTS_WANTED}] ${title} @ ${company}`);
         }
     },
 
     failedRequestHandler: async ({ request }, error) => {
-        log.error(`❌ Request failed: ${request.url}`, { error: error.message });
+        failedRequests++;
+        log.error(`❌ Request #${requestCount} failed: ${request.url.substring(0, 60)}...`, { 
+            error: error.message,
+            failedCount: failedRequests 
+        });
         
-        // Don't count failed requests towards our limit
-        if (requestCount > 0) requestCount--;
+        retryAttempt++;
+        
+        // Stop if too many failures
+        if (failedRequests >= MAX_FAILED_REQUESTS) {
+            log.error(`🛑 Too many failed requests (${failedRequests}). Stopping scraper.`);
+            throw new Error('Maximum failed requests exceeded');
+        }
+        
+        // Progressive backoff
+        const backoffDelay = exponentialBackoff(retryAttempt);
+        log.info(`⏳ Backing off for ${Math.round(backoffDelay/1000)}s before retry...`);
+        await new Promise(resolve => setTimeout(resolve, backoffDelay));
     },
 });
 
@@ -659,7 +740,7 @@ if (startUrl) {
     log.info('🏗️ Building URL from keyword/location parameters');
 } else {
     log.info('🌐 Using default CareerBuilder jobs page');
-    initialUrl = 'https://www.careerbuilder.com/jobs?cb_apply=false&radius=50&cb_veterans=false&cb_workhome=all';
+    initialUrl = 'https://www.careerbuilder.com/jobs?cb_apply=false&radius=50';
 }
 
 log.info('==========================================');
@@ -668,9 +749,15 @@ log.info('==========================================');
 log.info(`🎯 Target: ${RESULTS_WANTED} jobs`);
 log.info(`📄 Max pages: ${MAX_PAGES}`);
 log.info(`🔗 Start URL: ${initialUrl}`);
-log.info(`🔒 Proxy: ${proxyConf ? 'ENABLED ✅' : 'DISABLED ❌'}`);
+log.info(`🔒 Proxy: ${proxyConf ? 'ENABLED ✅ (RESIDENTIAL)' : 'DISABLED ❌'}`);
 log.info(`🍪 Cookies: ${cookies || cookiesJson ? 'PROVIDED ✅' : 'NOT PROVIDED'}`);
 log.info('==========================================');
+
+if (!proxyConf) {
+    log.error('❌ CRITICAL: No proxy configured! This will NOT work.');
+    log.error('Please enable Apify Proxy (RESIDENTIAL) in the input.');
+    await Actor.exit();
+}
 
 try {
     await crawler.run([{ 
@@ -686,19 +773,38 @@ try {
     log.info(`📊 Successfully scraped: ${jobsScraped} jobs`);
     log.info(`📄 Pages processed: ${pageCount}`);
     log.info(`🔢 Total requests: ${requestCount}`);
+    log.info(`❌ Failed requests: ${failedRequests}`);
     log.info('==========================================');
 
     if (jobsScraped === 0) {
         log.error('==========================================');
         log.error('❌ NO JOBS SCRAPED - TROUBLESHOOTING:');
         log.error('==========================================');
-        log.error('1. ✓ Check if search parameters return results on website');
-        log.error('2. ✓ Try different keywords or locations');
-        log.error('3. ✓ Verify proxy configuration is working');
+        log.error('1. 🔒 Ensure RESIDENTIAL proxy is enabled');
+        log.error('2. 🍪 Try adding cookies from your browser');
+        log.error('3. 🔗 Use Direct Search URL from browser');
+        log.error('4. ✓ Verify search returns results on website');
+        log.error('5. 🌐 Try different keywords/locations');
+        log.error('6. ⏰ Wait 10-15 mins before retry');
         log.error('==========================================');
+    } else if (jobsScraped < RESULTS_WANTED) {
+        log.warning('==========================================');
+        log.warning(`⚠️ Scraped ${jobsScraped}/${RESULTS_WANTED} jobs`);
+        log.warning('Possible reasons:');
+        log.warning('- Not enough jobs available for search');
+        log.warning('- Rate limiting kicked in');
+        log.warning('- Max pages limit reached');
+        log.warning('Solution: Run again to continue from where left off');
+        log.warning('==========================================');
     }
 } catch (error) {
-    log.error('Fatal error during scraping', { error: error.message, stack: error.stack });
+    log.error('💥 Fatal error during scraping', { 
+        error: error.message, 
+        stack: error.stack,
+        jobsScraped,
+        pagesProcessed: pageCount,
+        totalRequests: requestCount
+    });
     throw error;
 } finally {
     await Actor.exit();
