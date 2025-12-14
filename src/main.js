@@ -1,5 +1,5 @@
 import { Actor, log } from 'apify';
-import { CheerioCrawler, Dataset, PlaywrightCrawler, SessionPool } from 'crawlee';
+import { CheerioCrawler, Dataset, PlaywrightCrawler, RequestQueue, SessionPool } from 'crawlee';
 import { gotScraping } from 'got-scraping';
 import { load } from 'cheerio';
 
@@ -727,8 +727,12 @@ const runHtmlPhase = async () => {
     let requestCount = 0;
     let failedRequests = 0;
 
+    // Use a dedicated queue so later fallbacks can re-enqueue the same URLs.
+    const requestQueue = await RequestQueue.open('html-queue');
+
     const crawler = new CheerioCrawler({
         proxyConfiguration: proxyConf,
+        requestQueue,
         maxRequestsPerMinute: 60,
         maxRequestsPerCrawl: RESULTS_WANTED * 3,
         requestHandlerTimeoutSecs: 120,
@@ -911,12 +915,8 @@ const runHtmlPhase = async () => {
         },
     });
 
-    await crawler.run([
-        {
-            url: initialUrl,
-            userData: { label: 'LIST', page: 1 },
-        },
-    ]);
+    await requestQueue.addRequest({ url: initialUrl, userData: { label: 'LIST', page: 1 } }, { forefront: true });
+    await crawler.run();
 };
 
 // -------------- PLAYWRIGHT FALLBACK PHASE --------------
@@ -926,8 +926,12 @@ const runBrowserPhase = async () => {
     let requestCount = 0;
     let failedRequests = 0;
 
+    // Use a dedicated queue; the HTML phase may have already "handled" the start URL in the default queue.
+    const requestQueue = await RequestQueue.open('browser-queue');
+
     const crawler = new PlaywrightCrawler({
         proxyConfiguration: proxyConf,
+        requestQueue,
         maxRequestsPerCrawl: RESULTS_WANTED * 4,
         requestHandlerTimeoutSecs: 240,
         navigationTimeoutSecs: 240,
@@ -956,15 +960,50 @@ const runBrowserPhase = async () => {
                 requestCount += 1;
                 // Keep headers minimal in a real browser; let Chromium generate most fingerprinting headers.
                 await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+                if (!page.__cbInitScriptsApplied) {
+                    page.__cbInitScriptsApplied = true;
+                    await page.addInitScript(() => {
+                        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                    });
+                }
 
                 const cookiesToSet = cookieHeaderToPlaywrightCookies(cookieHeader);
                 if (cookiesToSet.length) await page.context().addCookies(cookiesToSet);
+
+                // Reduce bandwidth / speed up: block heavy asset types.
+                if (!page.__cbRoutesApplied) {
+                    page.__cbRoutesApplied = true;
+                    await page.route('**/*', async (route) => {
+                        const type = route.request().resourceType();
+                        if (type === 'image' || type === 'media' || type === 'font') return route.abort();
+                        return route.continue();
+                    });
+                }
             },
         ],
         async requestHandler({ request, page, enqueueLinks, log: crawlerLog, session }) {
             const { label = 'LIST', page: pageNo = 1 } = request.userData;
 
             if (jobsScraped >= RESULTS_WANTED) return;
+
+            const capturedJson = [];
+            const responseListener = async (response) => {
+                try {
+                    if (capturedJson.length >= 25) return;
+                    const url = response.url();
+                    const headers = response.headers();
+                    const contentType = (headers['content-type'] || '').toLowerCase();
+                    if (!contentType.includes('application/json')) return;
+                    const parsedUrl = new URL(url);
+                    if (!parsedUrl.hostname.includes('careerbuilder.com')) return;
+                    if (!/api|search|job/i.test(url)) return;
+                    const data = await response.json();
+                    capturedJson.push({ url, data });
+                } catch {
+                    // ignore
+                }
+            };
+            page.on('response', responseListener);
 
             await page.waitForLoadState('domcontentloaded');
             await page.waitForTimeout(randomBetween(1200, 2200));
@@ -976,6 +1015,10 @@ const runBrowserPhase = async () => {
                     await page.waitForTimeout(900);
                 }
             }
+
+            // Give XHR a moment to complete, then stop capturing.
+            await page.waitForTimeout(2500);
+            page.off('response', responseListener);
 
             const html = await page.content();
             const $ = load(html);
@@ -1012,6 +1055,29 @@ const runBrowserPhase = async () => {
             if (label === 'LIST') {
                 pageCount += 1;
                 crawlerLog.info(`BROWSER LIST page ${pageNo} (pages: ${pageCount}/${MAX_PAGES}, jobs: ${jobsScraped}/${RESULTS_WANTED})`);
+
+                if (capturedJson.length) {
+                    const urls = [...new Set(capturedJson.map((x) => x.url))].slice(0, 5);
+                    crawlerLog.info(`Captured ${capturedJson.length} JSON responses (sample): ${urls.join(' | ')}`);
+                } else {
+                    crawlerLog.debug('Captured 0 JSON responses on this page');
+                }
+
+                // First: try to extract jobs directly from captured JSON API responses.
+                for (const { url, data } of capturedJson.slice(0, 10)) {
+                    if (jobsScraped >= RESULTS_WANTED) break;
+                    const arrays = [];
+                    deepFindJobArrays(data, arrays, 5);
+                    if (!arrays.length) continue;
+                    crawlerLog.info(`Captured internal API jobs from ${url}`);
+                    for (const job of arrays[0]) {
+                        if (jobsScraped >= RESULTS_WANTED) break;
+                        const normalized = normalizeApiJob(job, { source: 'playwright-api-capture', searchUrl: url, page: pageNo });
+                        if (await pushJob(normalized)) {
+                            crawlerLog.info(`[PW+API] ${jobsScraped}/${RESULTS_WANTED}: ${normalized.title} @ ${normalized.company}`);
+                        }
+                    }
+                }
 
                 const jsonLdJobs = extractJsonLd($, crawlerLog);
                 for (const job of jsonLdJobs) {
@@ -1142,12 +1208,8 @@ const runBrowserPhase = async () => {
         },
     });
 
-    await crawler.run([
-        {
-            url: initialUrl,
-            userData: { label: 'LIST', page: 1 },
-        },
-    ]);
+    await requestQueue.addRequest({ url: initialUrl, userData: { label: 'LIST', page: 1 } }, { forefront: true });
+    await crawler.run();
 };
 
 try {
@@ -1165,8 +1227,10 @@ try {
             browserTried = true;
         }
         if (jobsScraped === 0) {
-            log.warning('No jobs scraped after HTML fallback; starting Playwright fallback...');
-            if (!browserTried) await runBrowserPhase();
+            if (!browserTried) {
+                log.warning('No jobs scraped after HTML fallback; starting Playwright fallback...');
+                await runBrowserPhase();
+            }
         }
     } else {
         log.info('Target reached with API phase; HTML fallback skipped.');
