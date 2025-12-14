@@ -233,6 +233,86 @@ const extractJsonLd = ($, crawlerLog) => {
     return jobPostings;
 };
 
+const deepFindJobArrays = (node, results, max = 200) => {
+    if (!node || results.length >= max) return;
+    if (Array.isArray(node)) {
+        const looksLikeJobArray =
+            node.length > 0 &&
+            node.every((item) => item && typeof item === 'object') &&
+            node.some((item) => pickValue(item, ['title', 'jobTitle', 'job_title', 'name'])) &&
+            node.some((item) => pickValue(item, ['company', 'companyName', 'company_name']) || item?.hiringOrganization?.name) &&
+            node.some((item) => pickValue(item, ['url', 'jobUrl', 'job_url', 'applyUrl', 'apply_url']) || pickValue(item, ['id', 'jobId', 'job_id']));
+
+        if (looksLikeJobArray) {
+            results.push(node);
+            return;
+        }
+        for (const item of node) deepFindJobArrays(item, results, max);
+        return;
+    }
+    if (typeof node === 'object') {
+        for (const value of Object.values(node)) {
+            deepFindJobArrays(value, results, max);
+            if (results.length >= max) return;
+        }
+    }
+};
+
+const extractEmbeddedJsonJobs = ($, crawlerLog) => {
+    const scripts = $('script').toArray();
+    const payloads = [];
+
+    for (const script of scripts) {
+        const id = $(script).attr('id') || '';
+        const type = ($(script).attr('type') || '').toLowerCase();
+        const text = $(script).html() || '';
+        if (!text || text.length < 20) continue;
+
+        // High-signal candidates first.
+        if (id === '__NEXT_DATA__' || type.includes('application/json')) {
+            payloads.push(text);
+        } else if (text.includes('window.__') && text.includes('{') && text.length < 2_000_000) {
+            // Potential inline state blobs (keep conservative)
+            payloads.push(text);
+        }
+    }
+
+    for (const payload of payloads) {
+        let json = null;
+        if (payload.trim().startsWith('{') || payload.trim().startsWith('[')) {
+            try {
+                json = JSON.parse(payload);
+            } catch {
+                json = null;
+            }
+        }
+
+        // Support common inline assignment patterns: window.__STATE__=...
+        if (!json && payload.includes('=')) {
+            const match = payload.match(/=\s*({[\s\S]+});?\s*$/);
+            if (match?.[1]) {
+                try {
+                    json = JSON.parse(match[1]);
+                } catch {
+                    json = null;
+                }
+            }
+        }
+
+        if (!json) continue;
+        const arrays = [];
+        deepFindJobArrays(json, arrays, 10);
+        for (const arr of arrays) {
+            if (arr.length) {
+                crawlerLog.debug(`Found embedded JSON job array with ${arr.length} items`);
+                return arr;
+            }
+        }
+    }
+
+    return [];
+};
+
 const extractJobUrls = ($, crawlerLog) => {
     const urls = new Set();
     const strategies = [
@@ -370,6 +450,7 @@ const apiHeaders = (referer) => {
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'gzip, deflate, br',
         Connection: 'keep-alive',
+        Origin: 'https://www.careerbuilder.com',
         Referer: referer || 'https://www.careerbuilder.com/',
         'Sec-Ch-Ua': `"Chromium";v="${chromeVersion}", "Google Chrome";v="${chromeVersion}", "Not?A_Brand";v="99"`,
         'Sec-Ch-Ua-Mobile': '?0',
@@ -494,6 +575,34 @@ const runApiPhase = async () => {
         },
     });
 
+    const warmUpSession = async (session, referer) => {
+        if (session.userData?.warmedUp) return true;
+        try {
+            const proxyUrl = await proxyConf.newUrl(session.id);
+            const res = await gotScraping({
+                url: initialUrl,
+                proxyUrl,
+                headers: baseHeaders(referer),
+                timeout: { request: 45000 },
+                throwHttpErrors: false,
+                retry: { limit: 0 },
+                responseType: 'text',
+                cookieJar: session.cookieJar,
+            });
+            const lower = (res.body || '').toLowerCase();
+            const looksBlocked = lower.includes('cloudflare') || lower.includes('captcha') || lower.includes('sorry, you have been blocked');
+            if (res.statusCode === 403 || looksBlocked) {
+                session.markBad();
+                return false;
+            }
+            session.userData = { ...(session.userData || {}), warmedUp: true };
+            return true;
+        } catch {
+            session.markBad();
+            return false;
+        }
+    };
+
     for (const candidate of candidates) {
         if (jobsScraped >= RESULTS_WANTED) break;
         let page = 1;
@@ -503,6 +612,8 @@ const runApiPhase = async () => {
 
         while (page <= MAX_PAGES && jobsScraped < RESULTS_WANTED) {
             const session = await apiSessionPool.getSession();
+            // Warm up to establish cookies/region before hitting JSON endpoints.
+            await warmUpSession(session, referer);
             const url = new URL(candidate.baseUrl);
             if (keyword) url.searchParams.set('keywords', keyword);
             if (location) url.searchParams.set('location', location);
@@ -634,7 +745,7 @@ const runHtmlPhase = async () => {
             async ({ request, session }) => {
                 requestCount += 1;
                 if (requestCount > 1) await humanDelay();
-                const headers = baseHeaders(request.userData.referer || initialUrl);
+                const headers = baseHeaders(request.userData.referer);
                 if (cookieHeader) headers.Cookie = cookieHeader;
                 request.headers = headers;
                 if (request.userData.referer) request.headers.Referer = request.userData.referer;
@@ -681,6 +792,18 @@ const runHtmlPhase = async () => {
                     };
                     if (await pushJob(jobData)) {
                         crawlerLog.info(`[LD] ${jobsScraped}/${RESULTS_WANTED}: ${jobData.title} @ ${jobData.company}`);
+                    }
+                }
+
+                // Embedded JSON (Next.js/app state) fallback
+                if (jobsScraped < RESULTS_WANTED) {
+                    const embeddedJobs = extractEmbeddedJsonJobs($, crawlerLog);
+                    for (const job of embeddedJobs) {
+                        if (jobsScraped >= RESULTS_WANTED) break;
+                        const normalized = normalizeApiJob(job, { source: 'embedded-json-list', searchUrl: request.url, page });
+                        if (await pushJob(normalized)) {
+                            crawlerLog.info(`[EMBED] ${jobsScraped}/${RESULTS_WANTED}: ${normalized.title} @ ${normalized.company}`);
+                        }
                     }
                 }
 
@@ -780,6 +903,9 @@ const runHtmlPhase = async () => {
         failedRequestHandler: async ({ request }, error) => {
             failedRequests += 1;
             log.error(`Request failed: ${request.url}`, { error: error.message, failedRequests });
+            const msg = (error?.message || '').toLowerCase();
+            const isBlocked = msg.includes('blocked') || msg.includes('status code') && msg.includes('403');
+            if (isBlocked) throw new Error('HTML blocked (403)');
             if (failedRequests > 10) throw new Error('Too many failed requests');
             await humanDelay(2000, 5000);
         },
@@ -818,15 +944,18 @@ const runBrowserPhase = async () => {
         },
         launchContext: {
             launchOptions: {
-                headless: true,
+                headless: false,
+                args: [
+                    '--disable-blink-features=AutomationControlled',
+                    '--no-sandbox',
+                ],
             },
         },
         preNavigationHooks: [
             async ({ page, request }) => {
                 requestCount += 1;
-                const headers = baseHeaders(request.userData.referer || initialUrl);
-                const { 'User-Agent': _ua, ...rest } = headers;
-                await page.setExtraHTTPHeaders(rest);
+                // Keep headers minimal in a real browser; let Chromium generate most fingerprinting headers.
+                await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
 
                 const cookiesToSet = cookieHeaderToPlaywrightCookies(cookieHeader);
                 if (cookiesToSet.length) await page.context().addCookies(cookiesToSet);
@@ -838,7 +967,7 @@ const runBrowserPhase = async () => {
             if (jobsScraped >= RESULTS_WANTED) return;
 
             await page.waitForLoadState('domcontentloaded');
-            await page.waitForTimeout(randomBetween(900, 1600));
+            await page.waitForTimeout(randomBetween(1200, 2200));
 
             if (label === 'LIST') {
                 // Trigger lazy-loaded results
@@ -865,9 +994,19 @@ const runBrowserPhase = async () => {
             ];
             const isBlocked = blockingIndicators.some((x) => lower.includes(x));
             if (isBlocked) {
-                crawlerLog.error('Blocking detected in browser phase, rotating session');
-                session.retire();
-                throw new Error('Blocked in browser phase');
+                // Some CF checks resolve after a short wait + reload on Residential IPs.
+                await page.waitForTimeout(10_000);
+                await page.reload({ waitUntil: 'domcontentloaded' });
+                const html2 = await page.content();
+                const $2 = load(html2);
+                const title2 = await page.title().catch(() => '');
+                const lower2 = `${title2}\n${$2('body').text()}`.toLowerCase();
+                const stillBlocked = blockingIndicators.some((x) => lower2.includes(x));
+                if (stillBlocked) {
+                    crawlerLog.error('Blocking detected in browser phase, rotating session');
+                    session.retire();
+                    throw new Error('Blocked in browser phase');
+                }
             }
 
             if (label === 'LIST') {
@@ -893,6 +1032,18 @@ const runBrowserPhase = async () => {
                     };
                     if (await pushJob(jobData)) {
                         crawlerLog.info(`[PW+LD] ${jobsScraped}/${RESULTS_WANTED}: ${jobData.title} @ ${jobData.company}`);
+                    }
+                }
+
+                // Embedded JSON (Next.js/app state) fallback
+                if (jobsScraped < RESULTS_WANTED) {
+                    const embeddedJobs = extractEmbeddedJsonJobs($, crawlerLog);
+                    for (const job of embeddedJobs) {
+                        if (jobsScraped >= RESULTS_WANTED) break;
+                        const normalized = normalizeApiJob(job, { source: 'playwright-embedded-json-list', searchUrl: request.url, page: pageNo });
+                        if (await pushJob(normalized)) {
+                            crawlerLog.info(`[PW+EMBED] ${jobsScraped}/${RESULTS_WANTED}: ${normalized.title} @ ${normalized.company}`);
+                        }
                     }
                 }
 
@@ -1000,6 +1151,7 @@ const runBrowserPhase = async () => {
 };
 
 try {
+    let browserTried = false;
     const apiResult = await runApiPhase();
     log.info(`API phase: jobs=${apiResult.jobs}, pages=${apiResult.pages}, candidate=${apiResult.used || 'none'}`);
 
@@ -1010,6 +1162,11 @@ try {
         } catch (error) {
             log.warning(`HTML fallback failed (${error.message}). Trying Playwright fallback...`);
             await runBrowserPhase();
+            browserTried = true;
+        }
+        if (jobsScraped === 0) {
+            log.warning('No jobs scraped after HTML fallback; starting Playwright fallback...');
+            if (!browserTried) await runBrowserPhase();
         }
     } else {
         log.info('Target reached with API phase; HTML fallback skipped.');
@@ -1020,6 +1177,12 @@ try {
     log.info(`Jobs scraped: ${jobsScraped}`);
     log.info(`Pages processed: ${pageCount}`);
     log.info('==========================================');
+
+    if (jobsScraped === 0) {
+        throw new Error(
+            'No jobs scraped. CareerBuilder is blocking the actor (403/Cloudflare). Use Apify RESIDENTIAL proxy (US) and provide fresh browser cookies in the input.',
+        );
+    }
 } catch (error) {
     log.error('Fatal error during scraping', {
         error: error.message,
