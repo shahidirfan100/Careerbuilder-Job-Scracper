@@ -73,51 +73,14 @@
       "editor": "proxy",
       "default": {
         "useApifyProxy": true,
-        "apifyProxyGroups": ["RESIDENTIAL"]
+        "apifyProxyGroups": ["RESIDENTIAL"],
+        "countryCode": "US"
       },
       "prefill": {
         "useApifyProxy": true,
-        "apifyProxyGroups": ["RESIDENTIAL"]
+        "apifyProxyGroups": ["RESIDENTIAL"],
+        "countryCode": "US"
       }
-    },
-    "mode": {
-      "title": "Mode (API first)",
-      "type": "string",
-      "description": "preferApi tries API, falls back to HTML; apiOnly skips HTML; htmlOnly skips API.",
-      "editor": "select",
-      "default": "preferApi",
-      "enum": ["preferApi", "apiOnly", "htmlOnly"],
-      "enumTitles": ["Prefer API (fallback HTML)", "API only", "HTML only"]
-    },
-    "searchApiUrl": {
-      "title": "Custom Search API URL (optional)",
-      "type": "string",
-      "description": "Override the detected API endpoint. Leave empty to use built-in candidates.",
-      "editor": "textfield",
-      "example": "https://www.careerbuilder.com/api/v3/search"
-    },
-    "apiPageSize": {
-      "title": "API Page Size",
-      "type": "integer",
-      "description": "Number of jobs to request per API page (if supported by the endpoint).",
-      "editor": "number",
-      "default": 50,
-      "minimum": 1,
-      "maximum": 200
-    },
-    "apiHeaders": {
-      "title": "API Headers (JSON)",
-      "type": "string",
-      "description": "Optional JSON object of headers to include in API requests (e.g. auth or special cookies).",
-      "editor": "textarea",
-      "example": "{\"x-client\": \"web\", \"cookie\": \"name=value\"}"
-    },
-    "apiExtraParams": {
-      "title": "API Extra Params (JSON)",
-      "type": "string",
-      "description": "Optional JSON object of extra query params for the API (e.g. sorting, facets).",
-      "editor": "textarea",
-      "example": "{\"sort\": \"date\", \"radius\": \"50\"}"
     }
   },
   "required": []

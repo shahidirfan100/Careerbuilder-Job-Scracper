@@ -1,5 +1,5 @@
 import { Actor, log } from 'apify';
-import { CheerioCrawler, Dataset } from 'crawlee';
+import { CheerioCrawler, Dataset, PlaywrightCrawler, SessionPool } from 'crawlee';
 import { gotScraping } from 'got-scraping';
 import { load } from 'cheerio';
 
@@ -76,6 +76,26 @@ const normalizeCookieHeader = ({ cookies: rawCookies, cookiesJson: jsonCookies }
         for (const [k, v] of Object.entries(parsed)) parts.push(`${k}=${v ?? ''}`);
     }
     return parts.join('; ');
+};
+
+const cookieHeaderToPlaywrightCookies = (headerValue) => {
+    if (!headerValue) return [];
+    const pairs = headerValue
+        .split(';')
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .map((p) => {
+            const idx = p.indexOf('=');
+            if (idx <= 0) return null;
+            return { name: p.slice(0, idx).trim(), value: p.slice(idx + 1).trim() };
+        })
+        .filter(Boolean);
+
+    return pairs.map(({ name, value }) => ({
+        name,
+        value,
+        url: 'https://www.careerbuilder.com/',
+    }));
 };
 
 const cleanDescriptionText = ($element) => {
@@ -319,14 +339,47 @@ const getJobArrayFromPayload = (payload) => {
     return [];
 };
 
-const baseHeaders = (referer) => ({
-    Accept: 'application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br, zstd',
-    Connection: 'keep-alive',
-    Referer: referer || 'https://www.careerbuilder.com/',
-    'User-Agent': getRandomUserAgent(),
-});
+const baseHeaders = (referer) => {
+    const userAgent = getRandomUserAgent();
+    const chromeVersion = userAgent.match(/Chrome\/(\d+)/)?.[1] || '131';
+    return {
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9',
+        // Note: `zstd` can increase suspicion and is not consistently supported by all stacks.
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'max-age=0',
+        Connection: 'keep-alive',
+        Referer: referer || 'https://www.careerbuilder.com/',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Ch-Ua': `"Chromium";v="${chromeVersion}", "Google Chrome";v="${chromeVersion}", "Not?A_Brand";v="99"`,
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': referer ? 'same-origin' : 'none',
+        'Sec-Fetch-User': '?1',
+        'User-Agent': userAgent,
+    };
+};
+
+const apiHeaders = (referer) => {
+    const userAgent = getRandomUserAgent();
+    const chromeVersion = userAgent.match(/Chrome\/(\d+)/)?.[1] || '131';
+    return {
+        Accept: 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        Connection: 'keep-alive',
+        Referer: referer || 'https://www.careerbuilder.com/',
+        'Sec-Ch-Ua': `"Chromium";v="${chromeVersion}", "Google Chrome";v="${chromeVersion}", "Not?A_Brand";v="99"`,
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'User-Agent': userAgent,
+    };
+};
 
 // -------------- MAIN --------------
 await Actor.init();
@@ -343,21 +396,26 @@ const {
     cookies,
     cookiesJson,
     proxyConfiguration = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] },
-    mode = 'preferApi', // preferApi | apiOnly | htmlOnly
-    searchApiUrl,
-    apiPageSize = 50,
-    apiHeaders,
-    apiExtraParams,
 } = input;
 
 const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 100;
 const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 20;
 
 const cookieHeader = normalizeCookieHeader({ cookies, cookiesJson });
-const parsedApiHeaders = parseJSON(apiHeaders) || {};
-const parsedApiParams = parseJSON(apiExtraParams) || {};
+// Internal defaults (no user input)
+const mode = 'preferApi'; // preferApi | apiOnly | htmlOnly
+const searchApiUrl = null;
+const apiPageSize = 50;
+const parsedApiHeaders = {};
+const parsedApiParams = {};
 
-const proxyConf = await Actor.createProxyConfiguration(proxyConfiguration);
+// CareerBuilder is US-centric; defaulting to US routing improves success rates (users can still override in the proxy editor).
+const effectiveProxyConfiguration = { ...proxyConfiguration };
+if (!('countryCode' in effectiveProxyConfiguration) && !('apifyProxyCountry' in effectiveProxyConfiguration)) {
+    effectiveProxyConfiguration.countryCode = 'US';
+}
+
+const proxyConf = await Actor.createProxyConfiguration(effectiveProxyConfiguration);
 if (!proxyConf) {
     log.error('No proxy configured. CareerBuilder blocks direct traffic. Enable Apify RESIDENTIAL proxy.');
     await Actor.exit();
@@ -405,6 +463,7 @@ log.info(`Max pages: ${MAX_PAGES}`);
 log.info(`Start URL: ${initialUrl}`);
 log.info(`Mode: ${mode}`);
 log.info(`Proxy: ${proxyConf ? 'ENABLED (RESIDENTIAL recommended)' : 'DISABLED'}`);
+log.info(`Proxy country: ${effectiveProxyConfiguration.countryCode || effectiveProxyConfiguration.apifyProxyCountry || 'AUTO'}`);
 log.info(`Cookies provided: ${cookieHeader ? 'YES' : 'NO'}`);
 log.info('==========================================');
 
@@ -427,6 +486,14 @@ const runApiPhase = async () => {
     let apiPages = 0;
     let usedCandidate = null;
 
+    const apiSessionPool = await SessionPool.open({
+        maxPoolSize: 4,
+        sessionOptions: {
+            maxUsageCount: 10,
+            maxErrorScore: 3,
+        },
+    });
+
     for (const candidate of candidates) {
         if (jobsScraped >= RESULTS_WANTED) break;
         let page = 1;
@@ -435,6 +502,7 @@ const runApiPhase = async () => {
         const referer = startUrl || initialUrl;
 
         while (page <= MAX_PAGES && jobsScraped < RESULTS_WANTED) {
+            const session = await apiSessionPool.getSession();
             const url = new URL(candidate.baseUrl);
             if (keyword) url.searchParams.set('keywords', keyword);
             if (location) url.searchParams.set('location', location);
@@ -447,25 +515,28 @@ const runApiPhase = async () => {
             for (const [k, v] of Object.entries(parsedApiParams)) url.searchParams.set(k, v);
 
             const headers = {
-                ...baseHeaders(referer),
+                ...apiHeaders(referer),
                 ...parsedApiHeaders,
             };
             if (cookieHeader) headers.Cookie = cookieHeader;
 
             let responseBody;
             let status;
+            let bodyText;
             try {
-                const proxyUrl = await proxyConf.newUrl();
+                const proxyUrl = await proxyConf.newUrl(session.id);
                 const res = await gotScraping({
                     url: url.href,
                     proxyUrl,
                     headers,
-                    timeout: 45000,
+                    timeout: { request: 45000 },
                     throwHttpErrors: false,
                     retry: { limit: 0 },
                     responseType: 'text',
+                    cookieJar: session.cookieJar,
                 });
                 status = res.statusCode;
+                bodyText = res.body;
                 try {
                     responseBody = JSON.parse(res.body);
                 } catch (err) {
@@ -473,6 +544,7 @@ const runApiPhase = async () => {
                 }
             } catch (error) {
                 log.warning(`API request failed (${candidate.name} p${page}): ${error.message}`);
+                session.markBad();
                 consecutiveEmpty += 1;
                 if (consecutiveEmpty >= 2) break;
                 await humanDelay(2000, 5000);
@@ -483,7 +555,20 @@ const runApiPhase = async () => {
             apiPages += 1;
             if (status && status >= 400) {
                 log.warning(`API ${candidate.name} returned status ${status}, switching candidate`);
+                session.markBad();
                 break;
+            }
+
+            const lower = (bodyText || '').toLowerCase();
+            const looksBlocked = lower.includes('cloudflare') || lower.includes('captcha') || lower.includes('access denied') || lower.includes('sorry, you have been blocked');
+            if (looksBlocked) {
+                log.warning(`API ${candidate.name} looks blocked, rotating session`);
+                session.retire();
+                consecutiveEmpty += 1;
+                if (consecutiveEmpty >= 2) break;
+                await humanDelay(4000, 9000);
+                page += 1;
+                continue;
             }
 
             const jobsArray = getJobArrayFromPayload(responseBody);
@@ -708,13 +793,224 @@ const runHtmlPhase = async () => {
     ]);
 };
 
+// -------------- PLAYWRIGHT FALLBACK PHASE --------------
+const runBrowserPhase = async () => {
+    log.warning('Starting Playwright fallback (browser mode)...');
+
+    let requestCount = 0;
+    let failedRequests = 0;
+
+    const crawler = new PlaywrightCrawler({
+        proxyConfiguration: proxyConf,
+        maxRequestsPerCrawl: RESULTS_WANTED * 4,
+        requestHandlerTimeoutSecs: 240,
+        navigationTimeoutSecs: 240,
+        maxConcurrency: 1,
+        maxRequestRetries: 3,
+        useSessionPool: true,
+        persistCookiesPerSession: true,
+        sessionPoolOptions: {
+            maxPoolSize: 3,
+            sessionOptions: {
+                maxUsageCount: 8,
+                maxErrorScore: 2,
+            },
+        },
+        launchContext: {
+            launchOptions: {
+                headless: true,
+            },
+        },
+        preNavigationHooks: [
+            async ({ page, request }) => {
+                requestCount += 1;
+                const headers = baseHeaders(request.userData.referer || initialUrl);
+                const { 'User-Agent': _ua, ...rest } = headers;
+                await page.setExtraHTTPHeaders(rest);
+
+                const cookiesToSet = cookieHeaderToPlaywrightCookies(cookieHeader);
+                if (cookiesToSet.length) await page.context().addCookies(cookiesToSet);
+            },
+        ],
+        async requestHandler({ request, page, enqueueLinks, log: crawlerLog, session }) {
+            const { label = 'LIST', page: pageNo = 1 } = request.userData;
+
+            if (jobsScraped >= RESULTS_WANTED) return;
+
+            await page.waitForLoadState('domcontentloaded');
+            await page.waitForTimeout(randomBetween(900, 1600));
+
+            if (label === 'LIST') {
+                // Trigger lazy-loaded results
+                for (let i = 0; i < 2; i++) {
+                    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+                    await page.waitForTimeout(900);
+                }
+            }
+
+            const html = await page.content();
+            const $ = load(html);
+
+            const title = await page.title().catch(() => '');
+            const bodyText = $('body').text();
+            const lower = `${title}\n${bodyText}`.toLowerCase();
+            const blockingIndicators = [
+                'sorry, you have been blocked',
+                'attention required',
+                'cloudflare',
+                'captcha',
+                'access denied',
+                'checking your browser',
+                'enable cookies',
+            ];
+            const isBlocked = blockingIndicators.some((x) => lower.includes(x));
+            if (isBlocked) {
+                crawlerLog.error('Blocking detected in browser phase, rotating session');
+                session.retire();
+                throw new Error('Blocked in browser phase');
+            }
+
+            if (label === 'LIST') {
+                pageCount += 1;
+                crawlerLog.info(`BROWSER LIST page ${pageNo} (pages: ${pageCount}/${MAX_PAGES}, jobs: ${jobsScraped}/${RESULTS_WANTED})`);
+
+                const jsonLdJobs = extractJsonLd($, crawlerLog);
+                for (const job of jsonLdJobs) {
+                    if (jobsScraped >= RESULTS_WANTED) break;
+                    const desc = cleanFromHtmlString(job.description || '');
+                    const jobData = {
+                        title: job.title || job.name || 'Not specified',
+                        company: job.hiringOrganization?.name || 'Not specified',
+                        location: buildLocationString(job.jobLocation),
+                        date_posted: job.datePosted || 'Not specified',
+                        salary: job.baseSalary?.value || job.estimatedSalary || 'Not specified',
+                        job_type: job.employmentType || 'Not specified',
+                        description_html: desc.description_html,
+                        description_text: desc.description_text,
+                        url: job.url || job['@id'] || job.identifier?.value,
+                        scraped_at: new Date().toISOString(),
+                        source: 'playwright-json-ld-list',
+                    };
+                    if (await pushJob(jobData)) {
+                        crawlerLog.info(`[PW+LD] ${jobsScraped}/${RESULTS_WANTED}: ${jobData.title} @ ${jobData.company}`);
+                    }
+                }
+
+                const jobUrls = extractJobUrls($, crawlerLog);
+                const urlsToEnqueue = [];
+                for (const url of jobUrls) {
+                    if (jobsScraped + urlsToEnqueue.length >= RESULTS_WANTED) break;
+                    if (!scrapedUrls.has(url)) urlsToEnqueue.push(url);
+                }
+
+                if (urlsToEnqueue.length) {
+                    await enqueueLinks({
+                        urls: urlsToEnqueue,
+                        userData: { label: 'DETAIL', referer: request.url },
+                    });
+                }
+
+                if (jobsScraped < RESULTS_WANTED && pageCount < MAX_PAGES) {
+                    const nextUrl = findNextPageUrl($, request.url, pageNo, crawlerLog);
+                    if (nextUrl && nextUrl !== request.url) {
+                        await enqueueLinks({
+                            urls: [nextUrl],
+                            userData: { label: 'LIST', page: pageNo + 1, referer: request.url },
+                        });
+                    }
+                }
+            }
+
+            if (label === 'DETAIL') {
+                if (scrapedUrls.has(request.url)) return;
+
+                const jsonLdJobs = extractJsonLd($, crawlerLog);
+                if (jsonLdJobs.length) {
+                    const job = jsonLdJobs[0];
+                    const desc = cleanFromHtmlString(job.description || '');
+                    const jobData = {
+                        title: job.title || job.name || 'Not specified',
+                        company: job.hiringOrganization?.name || 'Not specified',
+                        location: buildLocationString(job.jobLocation),
+                        date_posted: job.datePosted || 'Not specified',
+                        salary: job.baseSalary?.value || job.estimatedSalary || 'Not specified',
+                        job_type: job.employmentType || 'Not specified',
+                        description_html: desc.description_html,
+                        description_text: desc.description_text,
+                        url: job.url || request.url,
+                        scraped_at: new Date().toISOString(),
+                        source: 'playwright-json-ld-detail',
+                    };
+                    if (await pushJob(jobData)) {
+                        crawlerLog.info(`[PW+LD] ${jobsScraped}/${RESULTS_WANTED}: ${jobData.title} @ ${jobData.company}`);
+                    }
+                    return;
+                }
+
+                const titleText = $('h1').first().text().trim() || $('[class*="title"]').first().text().trim();
+                if (!titleText) {
+                    crawlerLog.warning(`Could not extract title from ${request.url}`);
+                    return;
+                }
+
+                const company = $('[class*="company"]').first().text().trim() || $('[data-testid*="company"]').first().text().trim() || 'Not specified';
+                const jobLocation = $('[class*="location"]').first().text().trim() || $('[data-testid*="location"]').first().text().trim() || 'Not specified';
+                const datePosted = $('time').first().text().trim() || $('[class*="posted"]').first().text().trim() || 'Not specified';
+
+                let $descElement = $('#jdp_description').first();
+                if ($descElement.length === 0) $descElement = $('[class*="description"]').first();
+                if ($descElement.length === 0) $descElement = $('.jdp-left-content').first();
+
+                const description_html = cleanDescriptionHtml($descElement);
+                const description_text = cleanDescriptionText($descElement);
+
+                const jobData = {
+                    title: titleText,
+                    company,
+                    location: jobLocation,
+                    date_posted: datePosted,
+                    salary: 'Not specified',
+                    job_type: 'Not specified',
+                    description_html,
+                    description_text,
+                    url: request.url,
+                    scraped_at: new Date().toISOString(),
+                    source: 'playwright-html-detail',
+                };
+
+                if (await pushJob(jobData)) {
+                    crawlerLog.info(`[PW] ${jobsScraped}/${RESULTS_WANTED}: ${titleText} @ ${company}`);
+                }
+            }
+        },
+        failedRequestHandler: async ({ request }, error) => {
+            failedRequests += 1;
+            log.error(`Playwright request failed: ${request.url}`, { error: error.message, failedRequests });
+            if (failedRequests > 6) throw new Error('Too many failed Playwright requests');
+            await humanDelay(3000, 7000);
+        },
+    });
+
+    await crawler.run([
+        {
+            url: initialUrl,
+            userData: { label: 'LIST', page: 1 },
+        },
+    ]);
+};
+
 try {
     const apiResult = await runApiPhase();
     log.info(`API phase: jobs=${apiResult.jobs}, pages=${apiResult.pages}, candidate=${apiResult.used || 'none'}`);
 
     if (jobsScraped < RESULTS_WANTED) {
         log.info('Switching to HTML fallback...');
-        await runHtmlPhase();
+        try {
+            await runHtmlPhase();
+        } catch (error) {
+            log.warning(`HTML fallback failed (${error.message}). Trying Playwright fallback...`);
+            await runBrowserPhase();
+        }
     } else {
         log.info('Target reached with API phase; HTML fallback skipped.');
     }
