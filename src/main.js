@@ -1,56 +1,133 @@
-// CareerBuilder Jobs Scraper - Production Grade (AGENTS.md Compliant)
-// Follows all Apify best practices for stealth and reliability
+// CareerBuilder Jobs Scraper - Production Grade with Cloudflare Handling
+// AGENTS.md Compliant + Enhanced Block Detection
 
-import { Actor, log } from 'apify';  // Use apify/log for secure logging
+import { Actor, log } from 'apify';
 import { PlaywrightCrawler, Dataset, createPlaywrightRouter } from 'crawlee';
 import { firefox } from 'playwright';
 import * as cheerio from 'cheerio';
 
 // ============================================================================
-// ROUTER PATTERN (AGENTS.md: use router pattern for complex crawls)
+// ROUTER PATTERN
 // ============================================================================
 
 const router = createPlaywrightRouter();
 
-// Default handler for search/listing pages
-router.addDefaultHandler(async ({ page, request, enqueueLinks, crawler }) => {
+router.addDefaultHandler(async ({ page, request, crawler }) => {
     const { maxJobs, currentJobCount, seenUrls, maxPages, currentPage } = crawler.userData;
 
-    log.info(`📄 Processing listing page: ${request.url}`);
+    log.info(`📄 Processing: ${request.url}`);
 
-    // Check limits
     if (currentJobCount.value >= maxJobs) {
         log.info(`🎯 Target reached: ${currentJobCount.value} jobs`);
         return;
     }
 
-    if (currentPage.value > maxPages) {
-        log.info(`📄 Max pages reached: ${currentPage.value - 1}`);
+    if (currentPage.value >= maxPages) {
+        log.info(`📄 Max pages reached: ${currentPage.value}`);
         return;
     }
 
+    // Wait for page to fully load (Cloudflare passes after JS execution)
+    log.info('⏳ Waiting for page to load...');
+
     try {
-        // Wait for job results to load
-        await page.waitForSelector('.data-results-content-parent, .job-listing, [data-job-did]', {
-            timeout: 30000
-        });
+        // First wait for document to be ready
+        await page.waitForLoadState('networkidle', { timeout: 45000 });
     } catch (e) {
-        log.warning('⏳ Timeout waiting for results, checking page content...');
+        log.warning('Network not idle after 45s, continuing anyway...');
     }
 
-    const content = await page.content();
+    // Check for Cloudflare challenge and wait for it to pass
+    let attempts = 0;
+    const maxAttempts = 3;
 
-    // Check for blocking
-    if (content.includes('regional_sites') || content.includes('MCB Bermuda') || content.includes('Access Denied')) {
-        log.error('🚫 BLOCKED! Need USA RESIDENTIAL proxy.');
+    while (attempts < maxAttempts) {
+        const content = await page.content();
+        const lowerContent = content.toLowerCase();
+
+        // Check for Cloudflare challenge indicators
+        const isCloudflareChallenge =
+            lowerContent.includes('checking your browser') ||
+            lowerContent.includes('please wait') ||
+            lowerContent.includes('just a moment') ||
+            lowerContent.includes('cf-browser-verification') ||
+            lowerContent.includes('challenge-platform');
+
+        if (isCloudflareChallenge) {
+            attempts++;
+            log.info(`☁️ Cloudflare challenge detected (attempt ${attempts}/${maxAttempts}), waiting...`);
+            await new Promise(r => setTimeout(r, 10000)); // Wait 10s for challenge to pass
+            continue;
+        }
+
+        // Check for geo-blocking
+        const isGeoBlocked =
+            content.includes('regional_sites') ||
+            content.includes('MCB Bermuda') ||
+            content.includes('not available in your region');
+
+        if (isGeoBlocked) {
+            log.error('🚫 GEO-BLOCKED: CareerBuilder not available in proxy region');
+
+            // Save screenshot for debugging
+            try {
+                const screenshot = await page.screenshot({ fullPage: true });
+                await Actor.setValue('BLOCKED_PAGE', screenshot, { contentType: 'image/png' });
+                log.info('📸 Screenshot saved as BLOCKED_PAGE in key-value store');
+            } catch (e) {
+                log.warning('Could not save screenshot');
+            }
+
+            // Log first 500 chars for debugging
+            log.info('Page content preview:', content.substring(0, 500));
+            return;
+        }
+
+        // Check for 403/Access Denied
+        const isAccessDenied =
+            lowerContent.includes('access denied') ||
+            lowerContent.includes('403 forbidden');
+
+        if (isAccessDenied) {
+            log.error('🚫 ACCESS DENIED (403)');
+            return;
+        }
+
+        // If we get here, page should be good
+        break;
+    }
+
+    // Check if we have job results
+    const content = await page.content();
+    const $ = cheerio.load(content);
+
+    // Look for job containers
+    const hasJobResults =
+        $('.data-results-content-parent').length > 0 ||
+        $('[data-job-did]').length > 0 ||
+        $('script[type="application/ld+json"]').length > 0;
+
+    if (!hasJobResults) {
+        log.warning('⚠️ No job results found on page');
+        log.info('Page title:', await page.title());
+
+        // Save screenshot for debugging
+        try {
+            const screenshot = await page.screenshot({ fullPage: true });
+            await Actor.setValue('NO_RESULTS_PAGE', screenshot, { contentType: 'image/png' });
+            log.info('📸 Screenshot saved as NO_RESULTS_PAGE');
+        } catch (e) {
+            log.warning('Could not save screenshot');
+        }
+
+        // Log some content for debugging
+        log.info('Body classes:', $('body').attr('class') || 'none');
+        log.info('H1 text:', $('h1').first().text().trim() || 'none');
         return;
     }
 
     currentPage.value++;
-    log.info(`✅ Page loaded (Page ${currentPage.value})`);
-
-    // Parse with Cheerio (AGENTS.md: use cheerio for static content)
-    const $ = cheerio.load(content);
+    log.info(`✅ Page loaded successfully (Page ${currentPage.value})`);
 
     // Extract JSON-LD (Primary strategy)
     const jobs = [];
@@ -77,7 +154,7 @@ router.addDefaultHandler(async ({ page, request, enqueueLinks, crawler }) => {
 
     log.info(`📊 Found ${jobs.length} jobs via JSON-LD`);
 
-    // Save jobs (AGENTS.md: clean and validate data before pushing)
+    // Save jobs
     for (const job of jobs) {
         if (currentJobCount.value >= maxJobs) break;
 
@@ -85,7 +162,6 @@ router.addDefaultHandler(async ({ page, request, enqueueLinks, crawler }) => {
         if (seenUrls.has(jobUrl)) continue;
         seenUrls.add(jobUrl);
 
-        // Clean and validate data
         const jobData = cleanJobData({
             id: job.identifier?.value || job['@id'] || `cb-${Date.now()}-${currentJobCount.value}`,
             title: job.title,
@@ -104,18 +180,19 @@ router.addDefaultHandler(async ({ page, request, enqueueLinks, crawler }) => {
         log.info(`💾 [${currentJobCount.value}/${maxJobs}] ${jobData.title} @ ${jobData.company}`);
     }
 
-    // CSS Fallback Strategy (AGENTS.md: use semantic CSS selectors and fallback strategies)
+    // CSS Fallback if no JSON-LD
     if (jobs.length === 0) {
-        log.info('🔄 No JSON-LD, trying CSS selectors...');
+        log.info('🔄 Trying CSS selectors...');
 
-        $('.data-results-content-parent .block, [data-job-did], .job-listing-item').each((_, el) => {
+        $('[data-job-did], .data-results-content-parent .block, .job-listing-item').each((_, el) => {
             if (currentJobCount.value >= maxJobs) return false;
 
             const $el = $(el);
-            const title = $el.find('.data-results-title, .job-title, a[data-gtm="job-title"]').text().trim();
+            const title = $el.find('.data-results-title, .job-title, a[data-gtm="job-title"]').text().trim() ||
+                $el.find('a').first().text().trim();
             const company = $el.find('.data-details span:first-child, .company-name').text().trim();
             const location = $el.find('.data-details span:nth-child(2), .job-location').text().trim();
-            const link = $el.find('a.data-results-content, a[data-gtm="job-title"]').attr('href');
+            const link = $el.find('a.data-results-content, a[data-gtm="job-title"], a').first().attr('href');
 
             if (title && link) {
                 const fullUrl = link.startsWith('http') ? link : `https://www.careerbuilder.com${link}`;
@@ -142,8 +219,8 @@ router.addDefaultHandler(async ({ page, request, enqueueLinks, crawler }) => {
         });
     }
 
-    // Pagination: Add next page if we need more
-    if (currentJobCount.value < maxJobs && currentPage.value <= maxPages) {
+    // Pagination
+    if (currentJobCount.value < maxJobs && currentPage.value < maxPages) {
         const currentUrl = new URL(request.url);
         const pageNum = parseInt(currentUrl.searchParams.get('page_number') || '1', 10);
         currentUrl.searchParams.set('page_number', String(pageNum + 1));
@@ -155,7 +232,7 @@ router.addDefaultHandler(async ({ page, request, enqueueLinks, crawler }) => {
 });
 
 // ============================================================================
-// HELPER FUNCTIONS (AGENTS.md: clean and validate data)
+// HELPER FUNCTIONS
 // ============================================================================
 
 function cleanJobData(job) {
@@ -227,7 +304,6 @@ function parseCookiesJson(cookiesJson) {
             })).filter(c => c.name && c.value);
         }
 
-        // Object format: { name: value, ... }
         return Object.entries(parsed).map(([name, value]) => ({
             name,
             value: String(value),
@@ -241,15 +317,14 @@ function parseCookiesJson(cookiesJson) {
 }
 
 // ============================================================================
-// MAIN ACTOR (AGENTS.md: validate input early, fail gracefully)
+// MAIN ACTOR
 // ============================================================================
 
 await Actor.init();
 
-log.info('🚀 CareerBuilder Scraper Starting (AGENTS.md Compliant)');
+log.info('🚀 CareerBuilder Scraper v3.1 (Enhanced Cloudflare Handling)');
 
 try {
-    // Get and validate input (AGENTS.md: validate input early with proper error handling)
     const input = await Actor.getInput() ?? {};
     log.info('📥 Input received', { ...input, cookiesJson: input.cookiesJson ? '[REDACTED]' : undefined });
 
@@ -262,11 +337,6 @@ try {
         cookiesJson = null,
         proxyConfiguration = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'], countryCode: 'US' }
     } = input;
-
-    // Input validation (AGENTS.md: validate input early)
-    if (!startUrls && !keyword) {
-        log.warning('⚠️ No startUrls or keyword provided, using default test search');
-    }
 
     // Build start URL
     let startUrl = 'https://www.careerbuilder.com/jobs';
@@ -289,13 +359,11 @@ try {
         log.info(`⚠️ Using default test: ${startUrl}`);
     }
 
-    // Parse cookies
     const cookies = parseCookiesJson(cookiesJson);
     if (cookies.length > 0) {
         log.info(`🍪 Loaded ${cookies.length} cookies from input`);
     }
 
-    // Create proxy configuration
     log.info('🔧 Configuring proxy...');
     let proxyConfig;
     try {
@@ -307,12 +375,11 @@ try {
             proxyConfig = await Actor.createProxyConfiguration();
             log.info('✅ Default proxy configured');
         } catch (e2) {
-            log.warning('❌ No proxy available, running without proxy');
+            log.warning('❌ No proxy available');
             proxyConfig = undefined;
         }
     }
 
-    // Shared state for tracking
     const userData = {
         maxJobs: results_wanted,
         maxPages: max_pages,
@@ -321,18 +388,16 @@ try {
         seenUrls: new Set(),
     };
 
-    // Create PlaywrightCrawler (AGENTS.md: proper concurrency settings Browser: 1-5)
-    log.info('🚀 Initializing PlaywrightCrawler with Firefox stealth...');
+    log.info('🚀 Initializing PlaywrightCrawler...');
 
     const crawler = new PlaywrightCrawler({
         proxyConfiguration: proxyConfig,
         requestHandler: router,
-        maxConcurrency: 2,  // AGENTS.md: Browser: 1-5
-        maxRequestRetries: 3,  // AGENTS.md: implement retry strategies
-        requestHandlerTimeoutSecs: 120,
-        navigationTimeoutSecs: 60,
+        maxConcurrency: 1,  // Single browser instance for stealth
+        maxRequestRetries: 3,
+        requestHandlerTimeoutSecs: 180,  // 3 minutes for slow pages
+        navigationTimeoutSecs: 90,  // 1.5 minutes for navigation
 
-        // Firefox for stealth (fingerprinting)
         browserPoolOptions: {
             useFingerprints: true,
             fingerprintOptions: {
@@ -357,10 +422,9 @@ try {
             },
         },
 
-        // AGENTS.md: use preNavigationHooks instead of additionalHttpHeaders
         preNavigationHooks: [
-            async ({ page, request }, gotoOptions) => {
-                // Set cookies from input
+            async ({ page }, gotoOptions) => {
+                // Inject cookies
                 if (cookies.length > 0) {
                     try {
                         await page.context().addCookies(cookies);
@@ -370,17 +434,21 @@ try {
                     }
                 }
 
-                // Set stealth headers via page
+                // Set headers
                 await page.setExtraHTTPHeaders({
                     'Accept-Language': 'en-US,en;q=0.9',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                    'DNT': '1',
-                    'Upgrade-Insecure-Requests': '1',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache',
                 });
 
-                // Random delay for human-like behavior
-                const delay = Math.floor(Math.random() * 2000) + 1000;
+                // Human-like delay
+                const delay = Math.floor(Math.random() * 3000) + 2000;
                 await new Promise(resolve => setTimeout(resolve, delay));
+
+                // Set longer timeout for navigation
+                gotoOptions.timeout = 90000;
+                gotoOptions.waitUntil = 'domcontentloaded';
             }
         ],
 
@@ -389,14 +457,11 @@ try {
         },
     });
 
-    // Attach shared state
     crawler.userData = userData;
 
-    // Run the crawler
     log.info(`🚀 Starting crawl from: ${startUrl}`);
     await crawler.run([{ url: startUrl }]);
 
-    // Final summary
     log.info('='.repeat(50));
     log.info(`✅ Scraping complete!`);
     log.info(`📊 Jobs collected: ${userData.currentJobCount.value}`);
@@ -404,11 +469,7 @@ try {
     log.info('='.repeat(50));
 
     if (userData.currentJobCount.value === 0) {
-        log.warning('⚠️ No jobs found. Possible causes:');
-        log.warning('   1. Geo-blocked (need USA RESIDENTIAL proxy)');
-        log.warning('   2. Invalid search parameters');
-        log.warning('   3. Site structure changed');
-        log.warning('   4. Try providing cookies in cookiesJson input');
+        log.warning('⚠️ No jobs found. Check BLOCKED_PAGE or NO_RESULTS_PAGE screenshots in Key-Value store.');
     }
 
 } catch (error) {
