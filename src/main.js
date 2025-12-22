@@ -167,7 +167,13 @@ const pushJob = async (job) => {
 const requestQueue = await RequestQueue.open(`pw-cb-${Date.now()}`);
 await requestQueue.addRequest({ url: initialUrl, userData: { label: 'LIST', page: 1 } }, { forefront: true });
 
-const camoufoxOptions = await camoufoxLaunchOptions({ headless: false, block_webrtc: true, block_webgl: true, block_images: true }).catch((err) => {
+const camoufoxOptions = await camoufoxLaunchOptions({
+    headless: false,
+    block_webrtc: false,
+    block_webgl: false,
+    block_images: false,
+    iKnowWhatImDoing: true,
+}).catch((err) => {
     log.warning(`Camoufox options failed, using defaults: ${err.message}`);
     return {};
 });
@@ -176,31 +182,32 @@ const crawler = new PlaywrightCrawler({
     proxyConfiguration: proxyConf,
     requestQueue,
     maxConcurrency: 2,
-    maxRequestRetries: 2,
+    maxRequestRetries: 5,
     requestHandlerTimeoutSecs: 240,
     navigationTimeoutSecs: 180,
     maxRequestsPerCrawl: RESULTS_WANTED * 4,
     useSessionPool: true,
     persistCookiesPerSession: true,
     sessionPoolOptions: {
-        maxPoolSize: 5,
-        sessionOptions: { maxUsageCount: 8, maxErrorScore: 2 },
+        maxPoolSize: 8,
+        sessionOptions: { maxUsageCount: 6, maxErrorScore: 1 },
     },
     launchContext: {
         launcher: firefox,
         launchOptions: { ...camoufoxOptions, headless: false },
     },
     preNavigationHooks: [
-        async ({ page }) => {
+        async ({ page, session }) => {
             await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-            await page.route('**/*', (route) => {
-                const type = route.request().resourceType();
-                if (type === 'image' || type === 'media' || type === 'font') return route.abort();
-                return route.continue();
+            await page.context().addInitScript(() => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             });
+            // Keep resources intact (images/webgl allowed) for lower fingerprint risk.
+            // Short random settle delay to mimic user.
+            await humanDelay(400, 900);
         },
     ],
-    async requestHandler({ request, page, enqueueLinks, log: crawlerLog }) {
+    async requestHandler({ request, page, enqueueLinks, log: crawlerLog, session }) {
         const { label = 'LIST', page: pageNo = 1 } = request.userData;
         if (jobsScraped >= RESULTS_WANTED) return;
 
@@ -220,8 +227,15 @@ const crawler = new PlaywrightCrawler({
         };
         page.on('response', responseListener);
 
-        await page.goto(request.url, { waitUntil: 'domcontentloaded' });
-        await page.waitForTimeout(randomBetween(900, 1800));
+        const response = await page.goto(request.url, { waitUntil: 'domcontentloaded' });
+        const status = response?.status() ?? 200;
+        if (status >= 400) {
+            crawlerLog.warning(`Navigation returned status ${status}, retiring session`);
+            session?.retire();
+            throw new Error(`Blocked (${status})`);
+        }
+
+        await page.waitForTimeout(randomBetween(1200, 2200));
         await page.waitForLoadState('networkidle').catch(() => {});
         page.off('response', responseListener);
 
@@ -230,6 +244,7 @@ const crawler = new PlaywrightCrawler({
         const blocked = ['access denied', 'captcha', 'cloudflare', 'blocked', 'verify you are human'].some((s) => lower.includes(s));
         if (blocked) {
             crawlerLog.warning('Blocking detected, retiring session');
+            session?.retire();
             throw new Error('Blocked');
         }
 
@@ -338,7 +353,7 @@ const crawler = new PlaywrightCrawler({
     },
     failedRequestHandler: async ({ request }, error) => {
         log.error(`Request failed: ${request.url}`, { error: error.message });
-        await humanDelay(2000, 4000);
+        await humanDelay(2500, 5000);
     },
 });
 
