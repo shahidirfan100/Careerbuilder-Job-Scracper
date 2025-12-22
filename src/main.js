@@ -9,6 +9,9 @@ const randomBetween = (min, max) => Math.floor(Math.random() * (max - min + 1)) 
 const humanDelay = async (min = 800, max = 1800) => sleep(randomBetween(min, max));
 
 const POSTED_DATE_MAP = { '24h': '1', '7d': '7', '30d': '30' };
+const FIREFOX_UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0';
+const DEFAULT_VIEWPORT = { width: 1920, height: 1080 };
 
 const buildStartUrl = (keyword, location, posted_date, radius) => {
     const url = new URL('https://www.careerbuilder.com/jobs');
@@ -173,6 +176,12 @@ const camoufoxOptions = await camoufoxLaunchOptions({
     block_webgl: false,
     block_images: false,
     iKnowWhatImDoing: true,
+    args: ['--window-size=1920,1080', '--screen-size=1920,1080', `--user-agent=${FIREFOX_UA}`],
+    firefoxUserPrefs: {
+        'general.appversion': '5.0 (Windows)',
+        'general.platform': 'Win64',
+        'media.navigator.enabled': false,
+    },
 }).catch((err) => {
     log.warning(`Camoufox options failed, using defaults: ${err.message}`);
     return {};
@@ -194,16 +203,26 @@ const crawler = new PlaywrightCrawler({
     },
     launchContext: {
         launcher: firefox,
-        launchOptions: { ...camoufoxOptions, headless: false },
+        launchOptions: {
+            ...camoufoxOptions,
+            headless: false,
+            viewport: DEFAULT_VIEWPORT,
+        },
     },
     preNavigationHooks: [
         async ({ page, session }) => {
-            await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+            const width = DEFAULT_VIEWPORT.width + randomBetween(-60, 60);
+            const height = DEFAULT_VIEWPORT.height + randomBetween(-40, 60);
+            await page.setViewportSize({ width, height });
+            await page.setExtraHTTPHeaders({
+                'Accept-Language': 'en-US,en;q=0.9',
+                'User-Agent': FIREFOX_UA,
+                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Upgrade-Insecure-Requests': '1',
+            });
             await page.context().addInitScript(() => {
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             });
-            // Keep resources intact (images/webgl allowed) for lower fingerprint risk.
-            // Short random settle delay to mimic user.
             await humanDelay(400, 900);
         },
     ],
@@ -227,6 +246,7 @@ const crawler = new PlaywrightCrawler({
         };
         page.on('response', responseListener);
 
+        const viewport = page.viewportSize() || DEFAULT_VIEWPORT;
         const response = await page.goto(request.url, { waitUntil: 'domcontentloaded' });
         const status = response?.status() ?? 200;
         if (status >= 400) {
@@ -237,6 +257,14 @@ const crawler = new PlaywrightCrawler({
 
         await page.waitForTimeout(randomBetween(1200, 2200));
         await page.waitForLoadState('networkidle').catch(() => {});
+        // Mimic human interaction: slight mouse move, scrolls.
+        const mouseX = randomBetween(200, Math.max(400, viewport.width - 200));
+        const mouseY = randomBetween(150, Math.max(300, viewport.height - 150));
+        await page.mouse.move(mouseX, mouseY, { steps: 20 }).catch(() => {});
+        await page.evaluate(() => {
+            const distance = Math.floor(document.body.scrollHeight * (0.2 + Math.random() * 0.3));
+            window.scrollBy(0, distance);
+        }).catch(() => {});
         page.off('response', responseListener);
 
         const bodyText = await page.$eval('body', (b) => b.innerText || '').catch(() => '');
