@@ -1,7 +1,6 @@
 import { Actor, Dataset, log } from 'apify';
 import { PlaywrightCrawler, RequestQueue } from 'crawlee';
-import { launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
-import { firefox } from 'playwright';
+import { chromium, launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
 
 // ---------- Helpers ----------
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
@@ -182,6 +181,8 @@ const camoufoxOptions = await camoufoxLaunchOptions({
         'general.platform': 'Win64',
         'media.navigator.enabled': false,
     },
+    locale: 'en-US',
+    timezoneId: 'America/New_York',
 }).catch((err) => {
     log.warning(`Camoufox options failed, using defaults: ${err.message}`);
     return {};
@@ -202,7 +203,7 @@ const crawler = new PlaywrightCrawler({
         sessionOptions: { maxUsageCount: 6, maxErrorScore: 1 },
     },
     launchContext: {
-        launcher: firefox,
+        launcher: chromium,
         launchOptions: {
             ...camoufoxOptions,
             headless: false,
@@ -210,7 +211,7 @@ const crawler = new PlaywrightCrawler({
         },
     },
     preNavigationHooks: [
-        async ({ page, session }) => {
+        async ({ page, session, request }) => {
             const width = DEFAULT_VIEWPORT.width + randomBetween(-60, 60);
             const height = DEFAULT_VIEWPORT.height + randomBetween(-40, 60);
             await page.setViewportSize({ width, height });
@@ -223,6 +224,17 @@ const crawler = new PlaywrightCrawler({
             await page.context().addInitScript(() => {
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             });
+
+            // Warm-up hit to homepage once per session to establish cookies/clearance.
+            if (!session.userData?.warmedUp) {
+                try {
+                    await page.goto('https://www.careerbuilder.com/?cb_apply=false', { waitUntil: 'domcontentloaded', timeout: 45000 });
+                    await humanDelay(600, 1200);
+                    session.userData = { ...(session.userData || {}), warmedUp: true };
+                } catch (e) {
+                    log.debug(`Warm-up failed: ${e.message}`);
+                }
+            }
             await humanDelay(400, 900);
         },
     ],
@@ -247,7 +259,16 @@ const crawler = new PlaywrightCrawler({
         page.on('response', responseListener);
 
         const viewport = page.viewportSize() || DEFAULT_VIEWPORT;
-        const response = await page.goto(request.url, { waitUntil: 'domcontentloaded' });
+        let response;
+        try {
+            response = await page.goto(request.url, { waitUntil: 'domcontentloaded' });
+        } catch (err) {
+            const msg = String(err?.message || '').toLowerCase();
+            if (msg.includes('proxy') || msg.includes('connection refused')) {
+                session?.retire();
+            }
+            throw err;
+        }
         const status = response?.status() ?? 200;
         if (status >= 400) {
             crawlerLog.warning(`Navigation returned status ${status}, retiring session`);
@@ -381,6 +402,10 @@ const crawler = new PlaywrightCrawler({
     },
     failedRequestHandler: async ({ request }, error) => {
         log.error(`Request failed: ${request.url}`, { error: error.message });
+        const msg = (error?.message || '').toLowerCase();
+        if (msg.includes('proxy') || msg.includes('connection refused') || msg.includes('blocked')) {
+            // Give crawler chance to rotate session/proxy.
+        }
         await humanDelay(2500, 5000);
     },
 });
