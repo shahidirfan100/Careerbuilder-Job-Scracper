@@ -34,6 +34,15 @@
       "enum": ["anytime", "24h", "7d", "30d"],
       "enumTitles": ["Anytime", "Last 24 hours", "Last 7 days", "Last 30 days"]
     },
+    "radius": {
+      "title": "Search Radius (miles)",
+      "type": "integer",
+      "description": "Search radius in miles",
+      "editor": "number",
+      "default": 50,
+      "minimum": 1,
+      "maximum": 250
+    },
     "results_wanted": {
       "title": "Number of Jobs",
       "type": "integer",
@@ -51,6 +60,93 @@
       "default": 20,
       "minimum": 1,
       "maximum": 100
+    },
+    "mode": {
+      "title": "Scraping Mode",
+      "type": "string",
+      "description": "API-first is fastest. HTML and Browser are fallbacks for blocking.",
+      "editor": "select",
+      "default": "preferApi",
+      "enum": ["preferApi", "apiOnly", "htmlOnly"],
+      "enumTitles": ["API-first (recommended)", "API-only", "HTML-only"]
+    },
+    "apiPageSize": {
+      "title": "API Page Size",
+      "type": "integer",
+      "description": "Number of jobs per API page",
+      "editor": "number",
+      "default": 50,
+      "minimum": 1,
+      "maximum": 100
+    },
+    "searchApiUrl": {
+      "title": "Custom API Endpoint (Optional)",
+      "type": "string",
+      "description": "Override with a known working JSON API endpoint",
+      "editor": "textfield",
+      "example": "https://www.careerbuilder.com/api/v3/search"
+    },
+    "apiHeadersJson": {
+      "title": "API Headers (JSON)",
+      "type": "string",
+      "description": "Additional headers for API requests (JSON object)",
+      "editor": "textarea",
+      "example": "{\"x-requested-with\":\"XMLHttpRequest\"}"
+    },
+    "apiParamsJson": {
+      "title": "API Params (JSON)",
+      "type": "string",
+      "description": "Additional query params for API requests (JSON object)",
+      "editor": "textarea",
+      "example": "{\"cb_apply\":\"false\"}"
+    },
+    "maxConcurrencyHttp": {
+      "title": "HTTP Concurrency",
+      "type": "integer",
+      "description": "Max concurrent HTTP requests for API/HTML",
+      "editor": "number",
+      "default": 10,
+      "minimum": 1,
+      "maximum": 50
+    },
+    "maxRequestsPerMinute": {
+      "title": "Max Requests per Minute",
+      "type": "integer",
+      "description": "Rate limit for HTTP crawler",
+      "editor": "number",
+      "default": 120,
+      "minimum": 30,
+      "maximum": 1000
+    },
+    "maxConcurrencyBrowser": {
+      "title": "Browser Concurrency",
+      "type": "integer",
+      "description": "Max concurrent browser pages (Playwright fallback)",
+      "editor": "number",
+      "default": 2,
+      "minimum": 1,
+      "maximum": 5
+    },
+    "headless": {
+      "title": "Headless Browser",
+      "type": "boolean",
+      "description": "Run Playwright headless (recommended for cloud)",
+      "default": true
+    },
+    "useSitemap": {
+      "title": "Use Sitemap Fallback",
+      "type": "boolean",
+      "description": "Seed job URLs from sitemap when listings are blocked",
+      "default": true
+    },
+    "maxSitemapUrls": {
+      "title": "Max Sitemap URLs",
+      "type": "integer",
+      "description": "Maximum job URLs to seed from sitemap",
+      "editor": "number",
+      "default": 200,
+      "minimum": 0,
+      "maximum": 2000
     },
     "cookies": {
       "title": "Browser Cookies (Optional)",

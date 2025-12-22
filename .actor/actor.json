@@ -10,6 +10,9 @@
   "input": "./input_schema.json",
   "output": "./output_schema.json",
   "nodeJsVersion": "22",
+  "meta": {
+    "generatedBy": "gpt-5"
+  },
   "storages": {
     "dataset": "./dataset_schema.json"
   }

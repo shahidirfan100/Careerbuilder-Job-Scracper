@@ -1,6 +1,25 @@
 {
   "actorSpecification": 1,
   "title": "CareerBuilder Jobs",
+  "fields": {
+    "type": "object",
+    "properties": {
+      "title": { "type": "string" },
+      "company": { "type": "string" },
+      "location": { "type": "string" },
+      "date_posted": { "type": "string" },
+      "salary": { "type": "string" },
+      "job_type": { "type": "string" },
+      "description_html": { "type": "string" },
+      "description_text": { "type": "string" },
+      "url": { "type": "string" },
+      "source": { "type": "string" },
+      "page_hint": { "type": "integer" },
+      "scraped_at": { "type": "string" },
+      "raw": { "type": "object" }
+    },
+    "additionalProperties": true
+  },
   "views": {
     "overview": {
       "title": "Overview",

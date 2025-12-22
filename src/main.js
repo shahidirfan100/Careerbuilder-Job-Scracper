@@ -1,7 +1,9 @@
-import { Actor, log } from 'apify';
-import { CheerioCrawler, Dataset, PlaywrightCrawler, RequestQueue, SessionPool } from 'crawlee';
-import { gotScraping } from 'got-scraping';
+import { Actor, Dataset, log } from 'apify';
+import { CheerioCrawler, PlaywrightCrawler, RequestQueue, SessionPool } from 'crawlee';
+import { launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
+import { firefox } from 'playwright';
 import { load } from 'cheerio';
+import { gotScraping } from 'got-scraping';
 
 // -------------- CONSTANTS --------------
 const API_CANDIDATES = [
@@ -32,9 +34,13 @@ const JSON_ARRAY_CANDIDATES = [
     ['data', 'results'],
     ['data', 'jobs'],
     ['data', 'items'],
+    ['data', 'jobResults'],
+    ['data', 'searchResults'],
+    ['data', 'search', 'results'],
     ['results'],
     ['jobs'],
     ['items'],
+    ['jobResults'],
 ];
 
 const USER_AGENTS = [
@@ -43,6 +49,11 @@ const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
 ];
+
+const PAGE_PARAM_CANDIDATES = ['page_number', 'page', 'pageNumber', 'pageIndex', 'p'];
+const PAGE_SIZE_PARAM_CANDIDATES = ['page_size', 'pageSize', 'perPage', 'per_page', 'limit', 'size', 'count'];
+const SITEMAP_CANDIDATES = ['https://www.careerbuilder.com/sitemap.xml', 'https://www.careerbuilder.com/sitemap_index.xml'];
+const POSTED_DATE_MAP = { '24h': '1', '7d': '7', '30d': '30' };
 
 // -------------- HELPERS --------------
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -60,6 +71,139 @@ const parseJSON = (maybeJson) => {
     }
 };
 
+const parseJsonObject = (value, label) => {
+    if (!value) return {};
+    const parsed = parseJSON(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        log.warning(`Invalid ${label}; expected JSON object`);
+        return {};
+    }
+    return parsed;
+};
+
+const toPositiveInt = (value) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return null;
+    if (num <= 0) return null;
+    return Math.trunc(num);
+};
+
+const coalesceInput = (...values) => {
+    for (const value of values) {
+        if (value === undefined || value === null) continue;
+        if (typeof value === 'string' && value.trim() === '') continue;
+        return value;
+    }
+    return undefined;
+};
+
+const isValidUrl = (value) => {
+    if (!value || typeof value !== 'string') return false;
+    try {
+        new URL(value);
+        return true;
+    } catch {
+        return false;
+    }
+};
+
+const parsePostedDateParam = (raw) => {
+    if (!raw) return null;
+    const value = String(raw).trim().toLowerCase();
+    const map = { '1': '24h', '7': '7d', '30': '30d', '24h': '24h', '7d': '7d', '30d': '30d' };
+    if (map[value]) return map[value];
+    if (value.includes('24')) return '24h';
+    if (value.includes('7')) return '7d';
+    if (value.includes('30')) return '30d';
+    return null;
+};
+
+const inferPagingParams = (searchParams) => {
+    const pageParam = PAGE_PARAM_CANDIDATES.find((key) => searchParams.has(key)) || 'page_number';
+    const pageSizeParam = PAGE_SIZE_PARAM_CANDIDATES.find((key) => searchParams.has(key)) || 'page_size';
+    return { pageParam, pageSizeParam };
+};
+
+const parseStartUrlParams = (urlString) => {
+    try {
+        const url = new URL(urlString);
+        const params = url.searchParams;
+        const keyword = params.get('keywords') || params.get('keyword') || params.get('q') || params.get('query') || '';
+        const location = params.get('location') || params.get('loc') || '';
+        const posted = params.get('posted') || params.get('postedDate') || params.get('date') || '';
+        const radius = toPositiveInt(params.get('radius') || params.get('rad'));
+        const pageSize = toPositiveInt(params.get('page_size') || params.get('pageSize') || params.get('perPage') || params.get('limit'));
+
+        const apiParams = {};
+        const { pageParam, pageSizeParam } = inferPagingParams(params);
+        for (const [key, value] of params.entries()) {
+            if (key === pageParam || key === pageSizeParam) continue;
+            apiParams[key] = value;
+        }
+
+        delete apiParams.keywords;
+        delete apiParams.keyword;
+        delete apiParams.q;
+        delete apiParams.query;
+        delete apiParams.location;
+        delete apiParams.loc;
+        delete apiParams.posted;
+        delete apiParams.postedDate;
+        delete apiParams.date;
+        delete apiParams.radius;
+        delete apiParams.rad;
+
+        return {
+            keyword: keyword.trim(),
+            location: location.trim(),
+            posted_date: parsePostedDateParam(posted),
+            radius,
+            apiPageSize: pageSize,
+            apiParams,
+        };
+    } catch {
+        return {};
+    }
+};
+
+const buildDiscoveredApiCandidateFromUrl = (urlString, fallbackPageSize) => {
+    try {
+        const url = new URL(urlString);
+        const { pageParam, pageSizeParam } = inferPagingParams(url.searchParams);
+        const staticParams = {};
+        for (const [key, value] of url.searchParams.entries()) {
+            if (key === pageParam || key === pageSizeParam) continue;
+            staticParams[key] = value;
+        }
+        const pageSize = toPositiveInt(url.searchParams.get(pageSizeParam)) || fallbackPageSize;
+        return {
+            name: 'discovered-api',
+            baseUrl: `${url.origin}${url.pathname}`,
+            pageParam,
+            pageSizeParam,
+            defaultPageSize: pageSize,
+            staticParams,
+            discoveredAt: new Date().toISOString(),
+        };
+    } catch {
+        return null;
+    }
+};
+
+const normalizeDiscoveredApiCandidate = (candidate, fallbackPageSize) => {
+    if (!candidate || typeof candidate !== 'object') return null;
+    if (!candidate.baseUrl || typeof candidate.baseUrl !== 'string') return null;
+    return {
+        name: candidate.name || 'discovered-api',
+        baseUrl: candidate.baseUrl,
+        pageParam: candidate.pageParam || 'page_number',
+        pageSizeParam: candidate.pageSizeParam || 'page_size',
+        defaultPageSize: toPositiveInt(candidate.defaultPageSize) || fallbackPageSize,
+        staticParams: candidate.staticParams && typeof candidate.staticParams === 'object' ? candidate.staticParams : {},
+        headers: candidate.headers && typeof candidate.headers === 'object' ? candidate.headers : {},
+        discoveredAt: candidate.discoveredAt,
+    };
+};
 const normalizeCookieHeader = ({ cookies: rawCookies, cookiesJson: jsonCookies }) => {
     if (rawCookies && typeof rawCookies === 'string' && rawCookies.trim()) return rawCookies.trim();
     const parsed = parseJSON(jsonCookies);
@@ -139,14 +283,13 @@ const cleanFromHtmlString = (html = '') => {
     };
 };
 
-const buildStartUrl = (kw, loc, date) => {
+const buildStartUrl = (kw, loc, date, radius) => {
     const url = new URL('https://www.careerbuilder.com/jobs');
     if (kw) url.searchParams.set('keywords', kw);
     if (loc) url.searchParams.set('location', loc);
-    const dateMap = { '24h': '1', '7d': '7', '30d': '30' };
-    if (date && date !== 'anytime' && dateMap[date]) url.searchParams.set('posted', dateMap[date]);
+    if (date && date !== 'anytime' && POSTED_DATE_MAP[date]) url.searchParams.set('posted', POSTED_DATE_MAP[date]);
     url.searchParams.set('cb_apply', 'false');
-    url.searchParams.set('radius', '50');
+    url.searchParams.set('radius', String(radius || 50));
     return url.href;
 };
 
@@ -419,6 +562,36 @@ const getJobArrayFromPayload = (payload) => {
     return [];
 };
 
+const buildApiUrl = (candidate, { page, pageSize, keyword, location, posted_date, radius, extraParams }) => {
+    let url;
+    try {
+        url = new URL(candidate.baseUrl);
+    } catch {
+        return null;
+    }
+
+    if (keyword) url.searchParams.set('keywords', keyword);
+    if (location) url.searchParams.set('location', location);
+    if (posted_date && posted_date !== 'anytime' && POSTED_DATE_MAP[posted_date]) {
+        url.searchParams.set('posted', POSTED_DATE_MAP[posted_date]);
+    }
+    if (radius) url.searchParams.set('radius', String(radius));
+
+    const paramsToApply = {
+        ...(candidate.staticParams || {}),
+        ...(extraParams || {}),
+    };
+    for (const [key, value] of Object.entries(paramsToApply)) {
+        if (value === undefined || value === null || value === '') continue;
+        url.searchParams.set(key, String(value));
+    }
+
+    url.searchParams.set(candidate.pageParam || 'page_number', String(page));
+    url.searchParams.set(candidate.pageSizeParam || 'page_size', String(pageSize));
+
+    return url;
+};
+
 const baseHeaders = (referer) => {
     const userAgent = getRandomUserAgent();
     const chromeVersion = userAgent.match(/Chrome\/(\d+)/)?.[1] || '131';
@@ -462,33 +635,124 @@ const apiHeaders = (referer) => {
     };
 };
 
+const fetchSitemapJobUrls = async ({ proxyConf, cookieHeader, maxUrls = 200, crawlerLog = log }) => {
+    const visited = new Set();
+    const jobUrls = new Set();
+    const queue = [...SITEMAP_CANDIDATES];
+
+    const sitemapSessionPool = await SessionPool.open({
+        maxPoolSize: 2,
+        sessionOptions: { maxUsageCount: 5, maxErrorScore: 2 },
+    });
+
+    while (queue.length && jobUrls.size < maxUrls) {
+        const sitemapUrl = queue.shift();
+        if (!sitemapUrl || visited.has(sitemapUrl)) continue;
+        visited.add(sitemapUrl);
+
+        let body = '';
+        try {
+            const session = await sitemapSessionPool.getSession();
+            const proxyUrl = await proxyConf.newUrl(session.id);
+            const headers = baseHeaders('https://www.careerbuilder.com/');
+            if (cookieHeader) headers.Cookie = cookieHeader;
+            const res = await gotScraping({
+                url: sitemapUrl,
+                proxyUrl,
+                headers,
+                timeout: { request: 45000 },
+                throwHttpErrors: false,
+                retry: { limit: 0 },
+                responseType: 'text',
+                cookieJar: session.cookieJar,
+            });
+            if (res.statusCode >= 400) {
+                session.markBad();
+                continue;
+            }
+            body = res.body || '';
+        } catch (error) {
+            crawlerLog.warning(`Sitemap fetch failed: ${sitemapUrl} (${error.message})`);
+            continue;
+        }
+
+        if (!body) continue;
+        const $ = load(body, { xmlMode: true });
+        const sitemapLocs = $('sitemapindex sitemap loc').toArray();
+        if (sitemapLocs.length) {
+            for (const loc of sitemapLocs) {
+                const locText = $(loc).text().trim();
+                if (locText && !visited.has(locText)) queue.push(locText);
+            }
+            continue;
+        }
+
+        const urlLocs = $('urlset url loc').toArray();
+        for (const loc of urlLocs) {
+            const locText = $(loc).text().trim();
+            if (!locText) continue;
+            if (!locText.includes('/job/')) continue;
+            jobUrls.add(locText);
+            if (jobUrls.size >= maxUrls) break;
+        }
+    }
+
+    return [...jobUrls];
+};
+
 // -------------- MAIN --------------
 await Actor.init();
 log.info('Actor initialized');
 
 const input = (await Actor.getInput()) ?? {};
-const {
-    keyword = '',
-    location = '',
-    posted_date = 'anytime',
-    results_wanted: RESULTS_WANTED_RAW = 100,
-    max_pages: MAX_PAGES_RAW = 20,
-    startUrl,
-    cookies,
-    cookiesJson,
-    proxyConfiguration = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] },
-} = input;
+const startUrl = input.startUrl;
+const startUrlParams = startUrl ? parseStartUrlParams(startUrl) : {};
 
-const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 100;
-const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 20;
+const keyword = String(coalesceInput(input.keyword, startUrlParams.keyword, '') || '').trim();
+const location = String(coalesceInput(input.location, startUrlParams.location, '') || '').trim();
+const posted_date = String(coalesceInput(input.posted_date, startUrlParams.posted_date, 'anytime') || 'anytime').trim().toLowerCase();
+const radius = Math.min(250, toPositiveInt(coalesceInput(input.radius, startUrlParams.radius, 50)) || 50);
 
-const cookieHeader = normalizeCookieHeader({ cookies, cookiesJson });
-// Internal defaults (no user input)
-const mode = 'preferApi'; // preferApi | apiOnly | htmlOnly
-const searchApiUrl = null;
-const apiPageSize = 50;
-const parsedApiHeaders = {};
-const parsedApiParams = {};
+const RESULTS_WANTED_RAW = input.results_wanted ?? 100;
+const MAX_PAGES_RAW = input.max_pages ?? 20;
+
+const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.min(10000, Math.max(1, +RESULTS_WANTED_RAW)) : 100;
+const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.min(100, Math.max(1, +MAX_PAGES_RAW)) : 20;
+
+const cookieHeader = normalizeCookieHeader({ cookies: input.cookies, cookiesJson: input.cookiesJson });
+
+const allowedModes = new Set(['preferApi', 'apiOnly', 'htmlOnly']);
+const mode = allowedModes.has(input.mode) ? input.mode : 'preferApi';
+if (input.mode && !allowedModes.has(input.mode)) {
+    log.warning(`Invalid mode "${input.mode}", falling back to preferApi`);
+}
+
+const apiPageSizeRaw = coalesceInput(input.apiPageSize, startUrlParams.apiPageSize, 50);
+const apiPageSize = Number.isFinite(+apiPageSizeRaw) ? Math.min(100, Math.max(1, +apiPageSizeRaw)) : 50;
+
+const maxConcurrencyHttpRaw = input.maxConcurrencyHttp ?? 10;
+const maxConcurrencyHttp = Number.isFinite(+maxConcurrencyHttpRaw) ? Math.min(50, Math.max(1, +maxConcurrencyHttpRaw)) : 10;
+
+const maxConcurrencyBrowserRaw = input.maxConcurrencyBrowser ?? 2;
+const maxConcurrencyBrowser = Number.isFinite(+maxConcurrencyBrowserRaw) ? Math.min(5, Math.max(1, +maxConcurrencyBrowserRaw)) : 2;
+
+const maxRequestsPerMinuteRaw = input.maxRequestsPerMinute ?? 120;
+const maxRequestsPerMinute = Number.isFinite(+maxRequestsPerMinuteRaw)
+    ? Math.min(1000, Math.max(30, +maxRequestsPerMinuteRaw))
+    : 120;
+
+const headlessBrowser = input.headless === undefined ? true : Boolean(input.headless);
+const useSitemap = input.useSitemap === undefined ? true : Boolean(input.useSitemap);
+const maxSitemapUrlsRaw = input.maxSitemapUrls ?? 200;
+const maxSitemapUrls = Number.isFinite(+maxSitemapUrlsRaw) ? Math.min(2000, Math.max(0, +maxSitemapUrlsRaw)) : 200;
+
+const searchApiUrl = input.searchApiUrl || null;
+const parsedApiHeaders = parseJsonObject(input.apiHeadersJson, 'apiHeadersJson');
+const parsedApiParams = {
+    ...(startUrlParams.apiParams || {}),
+    ...parseJsonObject(input.apiParamsJson, 'apiParamsJson'),
+};
+const proxyConfiguration = input.proxyConfiguration ?? { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] };
 
 // CareerBuilder is US-centric; defaulting to US routing improves success rates (users can still override in the proxy editor).
 const effectiveProxyConfiguration = { ...proxyConfiguration };
@@ -500,6 +764,15 @@ const proxyConf = await Actor.createProxyConfiguration(effectiveProxyConfigurati
 if (!proxyConf) {
     log.error('No proxy configured. CareerBuilder blocks direct traffic. Enable Apify RESIDENTIAL proxy.');
     await Actor.exit();
+}
+
+let discoveredApiCandidate = null;
+const storedCandidate = await Actor.getValue('DISCOVERED_API');
+if (storedCandidate) {
+    discoveredApiCandidate = normalizeDiscoveredApiCandidate(storedCandidate, apiPageSize);
+    if (discoveredApiCandidate) {
+        log.info(`Loaded discovered API endpoint: ${discoveredApiCandidate.baseUrl}`);
+    }
 }
 
 let jobsScraped = 0;
@@ -526,7 +799,7 @@ const resolveInitialUrl = () => {
         log.error('Invalid startUrl provided. Please provide a valid CareerBuilder URL.');
         return null;
     }
-    if (keyword || location) return buildStartUrl(keyword, location, posted_date);
+    if (keyword || location || posted_date !== 'anytime') return buildStartUrl(keyword, location, posted_date, radius);
     return 'https://www.careerbuilder.com/jobs?cb_apply=false&radius=50';
 };
 
@@ -543,6 +816,16 @@ log.info(`Target jobs: ${RESULTS_WANTED}`);
 log.info(`Max pages: ${MAX_PAGES}`);
 log.info(`Start URL: ${initialUrl}`);
 log.info(`Mode: ${mode}`);
+log.info(`Keyword: ${keyword || 'N/A'}`);
+log.info(`Location: ${location || 'N/A'}`);
+log.info(`Posted date: ${posted_date || 'anytime'}`);
+log.info(`Radius: ${radius}`);
+log.info(`API page size: ${apiPageSize}`);
+log.info(`HTTP concurrency: ${maxConcurrencyHttp}`);
+log.info(`HTTP max RPM: ${maxRequestsPerMinute}`);
+log.info(`Browser concurrency: ${maxConcurrencyBrowser}`);
+log.info(`Use sitemap fallback: ${useSitemap ? 'YES' : 'NO'}`);
+log.info(`Headless browser: ${headlessBrowser ? 'YES' : 'NO'}`);
 log.info(`Proxy: ${proxyConf ? 'ENABLED (RESIDENTIAL recommended)' : 'DISABLED'}`);
 log.info(`Proxy country: ${effectiveProxyConfiguration.countryCode || effectiveProxyConfiguration.apifyProxyCountry || 'AUTO'}`);
 log.info(`Cookies provided: ${cookieHeader ? 'YES' : 'NO'}`);
@@ -552,14 +835,24 @@ log.info('==========================================');
 const runApiPhase = async () => {
     if (mode === 'htmlOnly') return { jobs: 0, pages: 0, used: null };
     const candidates = [];
+    if (discoveredApiCandidate) {
+        candidates.push(discoveredApiCandidate);
+    }
     if (searchApiUrl) {
-        candidates.push({
-            name: 'custom-api',
-            baseUrl: searchApiUrl,
-            pageParam: 'page_number',
-            pageSizeParam: 'page_size',
-            defaultPageSize: apiPageSize,
-        });
+        if (!isValidUrl(searchApiUrl)) {
+            log.warning(`Invalid searchApiUrl provided; skipping: ${searchApiUrl}`);
+        } else {
+            const customCandidate = buildDiscoveredApiCandidateFromUrl(searchApiUrl, apiPageSize) || {
+                name: 'custom-api',
+                baseUrl: searchApiUrl,
+                pageParam: 'page_number',
+                pageSizeParam: 'page_size',
+                defaultPageSize: apiPageSize,
+                staticParams: {},
+            };
+            customCandidate.name = 'custom-api';
+            candidates.push(customCandidate);
+        }
     }
     candidates.push(...API_CANDIDATES);
 
@@ -568,7 +861,7 @@ const runApiPhase = async () => {
     let usedCandidate = null;
 
     const apiSessionPool = await SessionPool.open({
-        maxPoolSize: 4,
+        maxPoolSize: Math.max(4, Math.min(10, maxConcurrencyHttp)),
         sessionOptions: {
             maxUsageCount: 10,
             maxErrorScore: 3,
@@ -607,26 +900,30 @@ const runApiPhase = async () => {
         if (jobsScraped >= RESULTS_WANTED) break;
         let page = 1;
         let consecutiveEmpty = 0;
-        const pageSize = candidate.defaultPageSize || apiPageSize || 50;
+        const pageSize = toPositiveInt(candidate.defaultPageSize) || apiPageSize || 50;
         const referer = startUrl || initialUrl;
 
         while (page <= MAX_PAGES && jobsScraped < RESULTS_WANTED) {
             const session = await apiSessionPool.getSession();
             // Warm up to establish cookies/region before hitting JSON endpoints.
             await warmUpSession(session, referer);
-            const url = new URL(candidate.baseUrl);
-            if (keyword) url.searchParams.set('keywords', keyword);
-            if (location) url.searchParams.set('location', location);
-            if (posted_date && posted_date !== 'anytime') {
-                const map = { '24h': '1', '7d': '7', '30d': '30' };
-                if (map[posted_date]) url.searchParams.set('posted', map[posted_date]);
+            const url = buildApiUrl(candidate, {
+                page,
+                pageSize,
+                keyword,
+                location,
+                posted_date,
+                radius,
+                extraParams: parsedApiParams,
+            });
+            if (!url) {
+                log.warning(`Invalid API base URL for candidate ${candidate.name}`);
+                break;
             }
-            url.searchParams.set(candidate.pageParam || 'page_number', String(page));
-            url.searchParams.set(candidate.pageSizeParam || 'page_size', String(pageSize));
-            for (const [k, v] of Object.entries(parsedApiParams)) url.searchParams.set(k, v);
 
             const headers = {
                 ...apiHeaders(referer),
+                ...(candidate.headers || {}),
                 ...parsedApiHeaders,
             };
             if (cookieHeader) headers.Cookie = cookieHeader;
@@ -634,6 +931,7 @@ const runApiPhase = async () => {
             let responseBody;
             let status;
             let bodyText;
+            let contentType = '';
             try {
                 const proxyUrl = await proxyConf.newUrl(session.id);
                 const res = await gotScraping({
@@ -648,6 +946,7 @@ const runApiPhase = async () => {
                 });
                 status = res.statusCode;
                 bodyText = res.body;
+                contentType = res.headers?.['content-type'] || '';
                 try {
                     responseBody = JSON.parse(res.body);
                 } catch (err) {
@@ -680,6 +979,11 @@ const runApiPhase = async () => {
                 await humanDelay(4000, 9000);
                 page += 1;
                 continue;
+            }
+
+            const isJsonResponse = contentType.toLowerCase().includes('application/json') || contentType.toLowerCase().includes('text/json');
+            if (!responseBody && contentType && !isJsonResponse) {
+                log.debug(`API ${candidate.name} page ${page} returned content-type ${contentType}`);
             }
 
             const jobsArray = getJobArrayFromPayload(responseBody);
@@ -733,16 +1037,16 @@ const runHtmlPhase = async () => {
     const crawler = new CheerioCrawler({
         proxyConfiguration: proxyConf,
         requestQueue,
-        maxRequestsPerMinute: 60,
+        maxRequestsPerMinute,
         maxRequestsPerCrawl: RESULTS_WANTED * 3,
         requestHandlerTimeoutSecs: 120,
         navigationTimeoutSecs: 120,
-        maxConcurrency: 2,
+        maxConcurrency: maxConcurrencyHttp,
         maxRequestRetries: 5,
         useSessionPool: true,
         persistCookiesPerSession: true,
         sessionPoolOptions: {
-            maxPoolSize: 4,
+            maxPoolSize: Math.max(4, Math.min(10, maxConcurrencyHttp)),
             sessionOptions: { maxUsageCount: 10, maxErrorScore: 3 },
         },
         preNavigationHooks: [
@@ -915,8 +1219,40 @@ const runHtmlPhase = async () => {
         },
     });
 
+    if (useSitemap && maxSitemapUrls > 0) {
+        log.info('Fetching sitemap URLs for fallback seeding...');
+        const sitemapUrls = await fetchSitemapJobUrls({
+            proxyConf,
+            cookieHeader,
+            maxUrls: Math.min(maxSitemapUrls, RESULTS_WANTED * 2),
+            crawlerLog: log,
+        });
+        const urlsToSeed = sitemapUrls.filter((url) => !scrapedUrls.has(url));
+        if (urlsToSeed.length) {
+            await requestQueue.addRequests(
+                urlsToSeed.map((url) => ({ url, userData: { label: 'DETAIL', referer: initialUrl } })),
+            );
+            log.info(`Seeded ${urlsToSeed.length} sitemap job URLs`);
+        } else {
+            log.info('No sitemap URLs to seed');
+        }
+    }
+
     await requestQueue.addRequest({ url: initialUrl, userData: { label: 'LIST', page: 1 } }, { forefront: true });
     await crawler.run();
+};
+
+const maybePersistDiscoveredApi = async ({ url, data, crawlerLog }) => {
+    if (!url || !data) return;
+    const arrays = [];
+    deepFindJobArrays(data, arrays, 1);
+    if (!arrays.length) return;
+    const candidate = buildDiscoveredApiCandidateFromUrl(url, apiPageSize);
+    if (!candidate) return;
+    if (discoveredApiCandidate?.baseUrl === candidate.baseUrl) return;
+    discoveredApiCandidate = candidate;
+    await Actor.setValue('DISCOVERED_API', candidate);
+    crawlerLog.info(`Saved discovered API endpoint: ${candidate.baseUrl}`);
 };
 
 // -------------- PLAYWRIGHT FALLBACK PHASE --------------
@@ -925,6 +1261,8 @@ const runBrowserPhase = async () => {
 
     let requestCount = 0;
     let failedRequests = 0;
+    const camoufoxOptions = camoufoxLaunchOptions();
+    const launchOptions = { ...camoufoxOptions, headless: headlessBrowser };
 
     // Use a dedicated queue; the HTML phase may have already "handled" the start URL in the default queue.
     const requestQueue = await RequestQueue.open('browser-queue');
@@ -935,25 +1273,20 @@ const runBrowserPhase = async () => {
         maxRequestsPerCrawl: RESULTS_WANTED * 4,
         requestHandlerTimeoutSecs: 240,
         navigationTimeoutSecs: 240,
-        maxConcurrency: 1,
+        maxConcurrency: maxConcurrencyBrowser,
         maxRequestRetries: 3,
         useSessionPool: true,
         persistCookiesPerSession: true,
         sessionPoolOptions: {
-            maxPoolSize: 3,
+            maxPoolSize: Math.max(3, maxConcurrencyBrowser),
             sessionOptions: {
                 maxUsageCount: 8,
                 maxErrorScore: 2,
             },
         },
         launchContext: {
-            launchOptions: {
-                headless: false,
-                args: [
-                    '--disable-blink-features=AutomationControlled',
-                    '--no-sandbox',
-                ],
-            },
+            launcher: firefox,
+            launchOptions,
         },
         preNavigationHooks: [
             async ({ page, request }) => {
@@ -1066,6 +1399,7 @@ const runBrowserPhase = async () => {
                 // First: try to extract jobs directly from captured JSON API responses.
                 for (const { url, data } of capturedJson.slice(0, 10)) {
                     if (jobsScraped >= RESULTS_WANTED) break;
+                    await maybePersistDiscoveredApi({ url, data, crawlerLog });
                     const arrays = [];
                     deepFindJobArrays(data, arrays, 5);
                     if (!arrays.length) continue;
