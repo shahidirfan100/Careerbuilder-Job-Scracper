@@ -8,9 +8,57 @@ const randomBetween = (min, max) => Math.floor(Math.random() * (max - min + 1)) 
 const humanDelay = async (min = 800, max = 1800) => sleep(randomBetween(min, max));
 
 const POSTED_DATE_MAP = { '24h': '1', '7d': '7', '30d': '30' };
-const FIREFOX_UA =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0';
-const DEFAULT_VIEWPORT = { width: 1920, height: 1080 };
+const CHROME_UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+const DEFAULT_VIEWPORT = { width: 1366, height: 768 };
+
+const parseJSON = (maybeJson) => {
+    if (!maybeJson) return null;
+    try {
+        return typeof maybeJson === 'string' ? JSON.parse(maybeJson) : maybeJson;
+    } catch (err) {
+        log.warning(`Could not parse JSON input: ${err.message}`);
+        return null;
+    }
+};
+
+const normalizeCookieHeader = ({ cookies: rawCookies, cookiesJson }) => {
+    if (rawCookies && typeof rawCookies === 'string' && rawCookies.trim()) return rawCookies.trim();
+    const parsed = parseJSON(cookiesJson);
+    if (!parsed) return '';
+    const parts = [];
+    if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+            if (typeof item === 'string') parts.push(item.trim());
+            else if (item && typeof item === 'object' && item.name) {
+                parts.push(`${item.name}=${item.value ?? ''}`);
+            }
+        }
+    } else if (parsed && typeof parsed === 'object') {
+        for (const [k, v] of Object.entries(parsed)) parts.push(`${k}=${v ?? ''}`);
+    }
+    return parts.join('; ');
+};
+
+const cookieHeaderToPlaywrightCookies = (headerValue) => {
+    if (!headerValue) return [];
+    const pairs = headerValue
+        .split(';')
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .map((p) => {
+            const idx = p.indexOf('=');
+            if (idx <= 0) return null;
+            return { name: p.slice(0, idx).trim(), value: p.slice(idx + 1).trim() };
+        })
+        .filter(Boolean);
+
+    return pairs.map(({ name, value }) => ({
+        name,
+        value,
+        url: 'https://www.careerbuilder.com/',
+    }));
+};
 
 const buildStartUrl = (keyword, location, posted_date, radius) => {
     const url = new URL('https://www.careerbuilder.com/jobs');
@@ -131,6 +179,7 @@ const radius = Math.min(250, Number(input.radius) || 50);
 const RESULTS_WANTED = Number.isFinite(+input.results_wanted) ? Math.min(10000, Math.max(1, +input.results_wanted)) : 100;
 const MAX_PAGES = Number.isFinite(+input.max_pages) ? Math.min(100, Math.max(1, +input.max_pages)) : 20;
 const proxyConfiguration = input.proxyConfiguration ?? { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] };
+const cookieHeader = normalizeCookieHeader({ cookies: input.cookies, cookiesJson: input.cookiesJson });
 
 const initialUrl = normalizeStartUrl(input.startUrl) || buildStartUrl(keyword, location, posted_date, radius);
 const proxyConf = await Actor.createProxyConfiguration(proxyConfiguration);
@@ -175,7 +224,7 @@ const camoufoxOptions = await camoufoxLaunchOptions({
     block_webgl: false,
     block_images: false,
     iKnowWhatImDoing: true,
-    args: ['--window-size=1920,1080', '--screen-size=1920,1080', `--user-agent=${FIREFOX_UA}`],
+    args: ['--window-size=1366,768', '--disable-blink-features=AutomationControlled', `--user-agent=${CHROME_UA}`],
     firefoxUserPrefs: {
         'general.appversion': '5.0 (Windows)',
         'general.platform': 'Win64',
@@ -199,8 +248,8 @@ const crawler = new PlaywrightCrawler({
     useSessionPool: true,
     persistCookiesPerSession: true,
     sessionPoolOptions: {
-        maxPoolSize: 8,
-        sessionOptions: { maxUsageCount: 6, maxErrorScore: 1 },
+        maxPoolSize: 12,
+        sessionOptions: { maxUsageCount: 4, maxErrorScore: 1 },
     },
     launchContext: {
         launcher: chromium,
@@ -217,19 +266,33 @@ const crawler = new PlaywrightCrawler({
             await page.setViewportSize({ width, height });
             await page.setExtraHTTPHeaders({
                 'Accept-Language': 'en-US,en;q=0.9',
-                'User-Agent': FIREFOX_UA,
+                'User-Agent': CHROME_UA,
                 Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
                 'Upgrade-Insecure-Requests': '1',
+                'Sec-Ch-Ua': '"Chromium";v="131", "Google Chrome";v="131", "Not?A_Brand";v="99"',
+                'Sec-Ch-Ua-Platform': '"Windows"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                ...(cookieHeader ? { Cookie: cookieHeader } : {}),
             });
             await page.context().addInitScript(() => {
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             });
 
+            // Set cookies once per session
+            if (cookieHeader && !session.userData?.cookiesSet) {
+                try {
+                    await page.context().addCookies(cookieHeaderToPlaywrightCookies(cookieHeader));
+                    session.userData = { ...(session.userData || {}), cookiesSet: true };
+                } catch (e) {
+                    log.debug(`Failed to set cookies: ${e.message}`);
+                }
+            }
+
             // Warm-up hit to homepage once per session to establish cookies/clearance.
             if (!session.userData?.warmedUp) {
                 try {
                     await page.goto('https://www.careerbuilder.com/?cb_apply=false', { waitUntil: 'domcontentloaded', timeout: 45000 });
-                    await humanDelay(600, 1200);
+                    await humanDelay(800, 1500);
                     session.userData = { ...(session.userData || {}), warmedUp: true };
                 } catch (e) {
                     log.debug(`Warm-up failed: ${e.message}`);
@@ -261,7 +324,7 @@ const crawler = new PlaywrightCrawler({
         const viewport = page.viewportSize() || DEFAULT_VIEWPORT;
         let response;
         try {
-            response = await page.goto(request.url, { waitUntil: 'domcontentloaded' });
+            response = await page.goto(request.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
         } catch (err) {
             const msg = String(err?.message || '').toLowerCase();
             if (msg.includes('proxy') || msg.includes('connection refused')) {
@@ -270,13 +333,17 @@ const crawler = new PlaywrightCrawler({
             throw err;
         }
         const status = response?.status() ?? 200;
-        if (status >= 400) {
-            crawlerLog.warning(`Navigation returned status ${status}, retiring session`);
+        if (status === 403) {
+            crawlerLog.warning(`Navigation returned status ${status}, retiring session and retrying with new session`);
             session?.retire();
             throw new Error(`Blocked (${status})`);
         }
+        if (status >= 400) {
+            crawlerLog.warning(`Navigation returned status ${status}`);
+            throw new Error(`Blocked (${status})`);
+        }
 
-        await page.waitForTimeout(randomBetween(1200, 2200));
+        await page.waitForTimeout(randomBetween(1400, 2600));
         await page.waitForLoadState('networkidle').catch(() => {});
         // Mimic human interaction: slight mouse move, scrolls.
         const mouseX = randomBetween(200, Math.max(400, viewport.width - 200));
