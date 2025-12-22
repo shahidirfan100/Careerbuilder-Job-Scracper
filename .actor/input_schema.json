@@ -1,84 +1,49 @@
 {
-  "title": "CareerBuilder Job Scraper Input",
+  "title": "CareerBuilder Camoufox Crawler Input",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
-    "startUrl": {
-      "title": "Direct Search URL (Recommended)",
+    "startUrls": {
+      "title": "Start URLs",
+      "type": "array",
+      "description": "URLs to start scraping from (job search pages)",
+      "editor": "requestListSources",
+      "default": ["https://www.careerbuilder.com/jobs"],
+      "prefill": ["https://www.careerbuilder.com/jobs"],
+      "items": {
+        "type": "string"
+      }
+    },
+    "searchKeywords": {
+      "title": "Search Keywords",
       "type": "string",
-      "description": "Paste a CareerBuilder search URL from your browser. This is the most reliable method.",
+      "description": "Job search keywords (e.g., 'software engineer')",
       "editor": "textfield",
-      "pattern": "^https://www\\.careerbuilder\\.com/.*",
-      "example": "https://www.careerbuilder.com/jobs?keywords=developer&location=remote"
+      "default": "software engineer",
+      "example": "software engineer"
     },
-    "keyword": {
-      "title": "OR Search by Keywords",
-      "type": "string",
-      "description": "Job titles or keywords (e.g., 'Software Engineer'). Leave empty if using Direct URL above.",
-      "editor": "textfield",
-      "example": "Software Engineer"
-    },
-    "location": {
-      "title": "Location",
-      "type": "string",
-      "description": "City, state, or zip code (e.g., 'New York, NY')",
-      "editor": "textfield",
-      "example": "New York, NY"
-    },
-    "posted_date": {
-      "title": "Posted Date",
-      "type": "string",
-      "description": "Filter jobs by posting date",
-      "editor": "select",
-      "default": "anytime",
-      "enum": ["anytime", "24h", "7d", "30d"],
-      "enumTitles": ["Anytime", "Last 24 hours", "Last 7 days", "Last 30 days"]
-    },
-    "radius": {
-      "title": "Search Radius (miles)",
+    "maxRequestsPerCrawl": {
+      "title": "Max Requests per Crawl",
       "type": "integer",
-      "description": "Search radius in miles",
+      "description": "Maximum number of pages to scrape",
       "editor": "number",
       "default": 50,
       "minimum": 1,
-      "maximum": 250
+      "maximum": 1000
     },
-    "results_wanted": {
-      "title": "Number of Jobs",
+    "maxConcurrency": {
+      "title": "Max Concurrency",
       "type": "integer",
-      "description": "Maximum number of jobs to scrape",
+      "description": "Maximum number of concurrent browser instances",
       "editor": "number",
-      "default": 100,
+      "default": 3,
       "minimum": 1,
-      "maximum": 10000
-    },
-    "max_pages": {
-      "title": "Maximum Pages",
-      "type": "integer",
-      "description": "Maximum listing pages to process",
-      "editor": "number",
-      "default": 20,
-      "minimum": 1,
-      "maximum": 100
-    },
-    "cookies": {
-      "title": "Browser Cookies (Optional)",
-      "type": "string",
-      "description": "Copy cookies from your browser to bypass blocking. Format: 'name1=value1; name2=value2'",
-      "editor": "textarea",
-      "example": "sessionid=abc123; token=xyz789"
-    },
-    "cookiesJson": {
-      "title": "OR Cookies as JSON (Optional)",
-      "type": "string",
-      "description": "Cookies in JSON format (array or object)",
-      "editor": "textarea",
-      "example": "[{\"name\":\"sessionid\",\"value\":\"abc123\"}]"
+      "maximum": 10
     },
     "proxyConfiguration": {
       "title": "Proxy Configuration",
       "type": "object",
-      "description": "Apify Proxy (REQUIRED to avoid blocking)",
+      "description": "Apify Proxy (REQUIRED to avoid blocking - use RESIDENTIAL)",
       "editor": "proxy",
       "default": {
         "useApifyProxy": true,
@@ -92,5 +57,5 @@
       }
     }
   },
-  "required": []
+  "required": ["startUrls"]
 }
