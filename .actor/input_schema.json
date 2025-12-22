@@ -71,25 +71,6 @@
       "minimum": 1,
       "maximum": 100
     },
-    "extractionMethod": {
-      "title": "Extraction Method",
-      "type": "string",
-      "description": "Choose extraction strategy: Auto (tries API → HTML → Browser), or force a specific method",
-      "editor": "select",
-      "default": "auto",
-      "enum": [
-        "auto",
-        "api",
-        "html",
-        "browser"
-      ],
-      "enumTitles": [
-        "Auto (Recommended)",
-        "API Only",
-        "HTML Only",
-        "Browser Only"
-      ]
-    },
     "cookiesJson": {
       "title": "Cookies (JSON)",
       "type": "string",

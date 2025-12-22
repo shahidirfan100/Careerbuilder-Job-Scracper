@@ -579,62 +579,73 @@ const parseCookies = (cookiesJson) => {
     await Actor.init();
 
     try {
-        const input = await Actor.getInput();
+        const input = await Actor.getInput() || {};
         const log = Actor.log;
 
-        // Log raw input for debugging
-        log.info('📥 Raw input received:', JSON.stringify(input));
+        log.info('🚀 CareerBuilder Scraper Starting...');
+        log.info('📥 Input received:', JSON.stringify(input));
 
-        const {
-            startUrls = 'https://www.careerbuilder.com/jobs',
-            keyword = '',
-            location = '',
-            posted_date = 'anytime',
-            radius = 50,
-            results_wanted = 20,
-            max_pages = 10,
-            cookiesJson,
-            proxyConfiguration,
-            extractionMethod = 'auto'
-        } = input || {};
+        // Parse input with defaults - HARDCODED TEST KEYWORD FOR DEBUGGING
+        const keyword = input.keyword || 'admin';  // Default to 'admin' for testing
+        const location = input.location || '';
+        const startUrls = input.startUrls || 'https://www.careerbuilder.com/jobs';
+        const posted_date = input.posted_date || 'anytime';
+        const radius = input.radius || 50;
+        const results_wanted = input.results_wanted || 20;
+        const max_pages = input.max_pages || 10;
+        const cookiesJson = input.cookiesJson;
+        const proxyConfiguration = input.proxyConfiguration;
 
-        log.info('🚀 CareerBuilder Scraper - 3-Tier Extraction with Camoufox Stealth');
+        // Extraction method is always 'auto' - handled internally
+        const extractionMethod = 'auto';
+
+        log.info(`📊 Config: keyword="${keyword}", location="${location}"`);
         log.info(`📊 Target: ${results_wanted} jobs, Max pages: ${max_pages}`);
-        log.info(`🔧 Extraction method: ${extractionMethod}`);
 
         // Build URLs
         let urlsToCrawl = [];
         if (keyword.trim() || location.trim()) {
             const searchUrl = buildSearchUrl({ keyword, location, posted_date, radius });
             urlsToCrawl = [searchUrl];
-            log.info(`🔍 Search: ${searchUrl}`);
+            log.info(`🔍 Search URL: ${searchUrl}`);
         } else {
-            // Handle both string and array inputs
             if (typeof startUrls === 'string') {
                 urlsToCrawl = startUrls.split('\n').map(u => u.trim()).filter(Boolean);
             } else if (Array.isArray(startUrls)) {
-                urlsToCrawl = startUrls.map(item => {
-                    return typeof item === 'string' ? item : (item.url || '');
-                }).filter(Boolean);
+                urlsToCrawl = startUrls.map(item => typeof item === 'string' ? item : (item.url || '')).filter(Boolean);
             } else {
                 urlsToCrawl = ['https://www.careerbuilder.com/jobs'];
             }
-            log.info(`📋 URLs: ${urlsToCrawl.length} - ${urlsToCrawl[0]}`);
+            log.info(`📋 Using URLs: ${urlsToCrawl.length}`);
         }
 
         if (urlsToCrawl.length === 0) {
-            throw new Error('No URLs to crawl! Please provide startUrls or keyword+location.');
+            log.error('❌ No URLs to crawl!');
+            await Actor.exit({ exitCode: 1 });
+            return;
         }
 
-        // Create USA residential proxy (REQUIRED for geo-blocking)
-        const proxyConf = proxyConfiguration
-            ? await Actor.createProxyConfiguration(proxyConfiguration)
-            : await Actor.createProxyConfiguration({
-                groups: ['RESIDENTIAL'],
-                countryCode: 'US'
-            });
-
-        log.info('✅ Proxy: RESIDENTIAL (USA)');
+        // Create proxy configuration - with fallback
+        let proxyConf;
+        try {
+            proxyConf = proxyConfiguration
+                ? await Actor.createProxyConfiguration(proxyConfiguration)
+                : await Actor.createProxyConfiguration({
+                    groups: ['RESIDENTIAL'],
+                    countryCode: 'US'
+                });
+            log.info('✅ Proxy configured: RESIDENTIAL (USA)');
+        } catch (proxyError) {
+            log.warning(`⚠️ Proxy config failed: ${proxyError.message}`);
+            log.warning('⚠️ Trying without specific proxy settings...');
+            try {
+                proxyConf = await Actor.createProxyConfiguration();
+                log.info('✅ Default proxy configured');
+            } catch (e) {
+                log.error('❌ All proxy configurations failed');
+                proxyConf = null;
+            }
+        }
 
         const cookieHeader = parseCookies(cookiesJson);
         if (cookieHeader) log.info('🍪 Cookies configured');

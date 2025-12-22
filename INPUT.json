@@ -1,12 +1,11 @@
 {
     "startUrls": "https://www.careerbuilder.com/jobs",
-    "keyword": "software engineer",
-    "location": "New York",
+    "keyword": "admin",
+    "location": "",
     "posted_date": "anytime",
     "radius": 50,
     "results_wanted": 20,
     "max_pages": 10,
-    "extractionMethod": "auto",
     "proxyConfiguration": {
         "useApifyProxy": true,
         "apifyProxyGroups": [
