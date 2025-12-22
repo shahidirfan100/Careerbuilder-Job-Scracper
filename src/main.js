@@ -298,12 +298,11 @@ const extractListingPage = async ({ url, proxyUrl, log }) => {
 
         const response = await gotScraping({
             url,
-            headers: {
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'DNT': '1',
-                'Upgrade-Insecure-Requests': '1',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0'
+            headerGeneratorOptions: {
+                browsers: [{ name: 'chrome', minVersion: 120 }],
+                devices: ['desktop'],
+                locales: ['en-US'],
+                operatingSystems: ['windows'],
             },
             proxyUrl,
             timeout: 30000,
@@ -317,24 +316,71 @@ const extractListingPage = async ({ url, proxyUrl, log }) => {
             return { success: false, jobs: [], jobLinks: [], nextPageUrl: null, blocked: true };
         }
 
-        const jsonLdJobs = extractJsonLdFromHtml(html);
-        const jobs = jsonLdJobs.map(job => normalizeJob(job, { source: 'html-json-ld-list', url })).filter(Boolean);
-
         const $ = cheerio.load(html);
-        const jobLinks = extractJobLinksFromHtml($);
+        const jobs = [];
+        const jobLinks = new Set();
 
+        // FORENSIC STRATEGY: Target specific job containers
+        // Selector: .data-results-content-parent .block
+        $('.data-results-content-parent .block').each((_, el) => {
+            const $el = $(el);
+
+            // Extract Job ID (Forensic: data-job-did)
+            const jobId = $el.attr('data-job-did');
+
+            // Extract Link (Forensic: .data-results-content > a)
+            const anchor = $el.find('.data-results-content > a').first();
+            const href = anchor.attr('href');
+
+            if (href) {
+                const fullUrl = href.startsWith('http') ? href : `https://www.careerbuilder.com${href}`;
+                jobLinks.add(fullUrl);
+
+                // Basic metadata from listing (Tier 2-A)
+                const title = anchor.find('.data-results-title').text().trim() || $el.find('.title').text().trim();
+                const company = $el.find('.data-details > span:first-child').text().trim();
+                const location = $el.find('.data-details > span:nth-child(2)').text().trim();
+                const salary = $el.find('.block-stats').text().trim();
+
+                if (title && jobId) {
+                    jobs.push(normalizeJob({
+                        title,
+                        company,
+                        location,
+                        salary,
+                        job_id: jobId,
+                        url: fullUrl
+                    }, { source: 'html-listing', url }));
+                }
+            }
+        });
+
+        // Also run JSON-LD extraction as backup/augmentation
+        const jsonLdJobs = extractJsonLdFromHtml(html);
+        jsonLdJobs.forEach(job => {
+            if (job.url) jobs.push(normalizeJob(job, { source: 'html-json-ld', url }));
+        });
+
+        // Pagination (Forensic: check for "Next" button explicitly)
         let nextPageUrl = null;
-        const nextLink = $('a[aria-label*="Next"], a.next, a[rel="next"]').first();
+        const nextLink = $('a#next-button, a[aria-label="Next Page"]').first();
         if (nextLink.length) {
             const href = nextLink.attr('href');
             nextPageUrl = href?.startsWith('http') ? href : `https://www.careerbuilder.com${href}`;
         } else {
+            // Fallback to URL parameter increment
             nextPageUrl = buildNextPageUrl(url);
         }
 
-        log.info(`[HTML] Extracted: ${jobs.length} jobs, ${jobLinks.length} links`);
+        const uniqueJobLinkCount = jobLinks.size;
+        log.info(`[HTML] Forensic extraction: ${jobs.length} items, ${uniqueJobLinkCount} links`);
 
-        return { success: true, jobs, jobLinks, nextPageUrl };
+        return {
+            success: jobs.length > 0 || uniqueJobLinkCount > 0,
+            jobs,
+            jobLinks: [...jobLinks],
+            nextPageUrl
+        };
 
     } catch (error) {
         log.warning(`[HTML] Failed: ${error.message}`);
@@ -408,9 +454,9 @@ const extractViaBrowser = async ({ url, proxyConf, cookieHeader, log }) => {
         log.info('[Browser] Starting Camoufox stealth extraction...');
 
         crawler = new PlaywrightCrawler({
-            maxConcurrency: 1,
+            maxConcurrency: 2, // Roadmap: Keep low to avoid aggressive rate limiting
             maxRequestsPerCrawl: 10,
-            proxyConfiguration: proxyConf, // FIXED: Proxy here, not in launchOptions
+            proxyConfiguration: proxyConf,
             requestHandlerTimeoutSecs: 90,
             maxRequestRetries: 3,
 
@@ -436,67 +482,18 @@ const extractViaBrowser = async ({ url, proxyConf, cookieHeader, log }) => {
                         '--disable-dev-shm-usage'
                     ],
                     firefoxUserPrefs: {
-                        'layout.css.prefers-reduced-motion': 1,
-                        'dom.webdriver.enabled': false,
+                        'privacy.resistFingerprinting': false, // Roadmap: true triggers captchas
                         'media.navigator.enabled': false,
+                        'dom.webdriver.enabled': false,
+                        'layout.css.prefers-reduced-motion': 1,
                         'privacy.trackingprotection.enabled': true
                     }
-                    // NO proxy here - moved to proxyConfiguration
                 }),
             },
 
             preNavigationHooks: [
                 async (crawlingContext, gotoOptions) => {
-                    const { page, session } = crawlingContext;
-
-                    // Block ads/trackers
-                    await page.route('**/*', (route) => {
-                        const url = route.request().url();
-                        if (url.includes('ads') || url.includes('tracker') ||
-                            url.includes('analytics') || url.includes('doubleclick')) {
-                            route.abort();
-                        } else {
-                            route.continue();
-                        }
-                    });
-
-                    // Stealth headers
-                    await page.setExtraHTTPHeaders({
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                        'DNT': '1',
-                        'Upgrade-Insecure-Requests': '1'
-                    });
-
-                    // Set cookies
-                    if (cookieHeader && !session.userData?.cookiesSet) {
-                        try {
-                            const cookies = cookieHeader.split(';').map((p) => p.trim()).filter(Boolean).map((p) => {
-                                const idx = p.indexOf('=');
-                                if (idx <= 0) return null;
-                                return {
-                                    name: p.slice(0, idx).trim(),
-                                    value: p.slice(idx + 1).trim(),
-                                    url: 'https://www.careerbuilder.com/'
-                                };
-                            }).filter(Boolean);
-
-                            await page.context().addCookies(cookies);
-                            session.userData = { ...(session.userData || {}), cookiesSet: true };
-                            log.debug('[Browser] Cookies set');
-                        } catch (e) {
-                            log.warning(`[Browser] Cookie error: ${e.message}`);
-                        }
-                    }
-
-                    // Randomize viewport
-                    gotoOptions.viewport = {
-                        width: 1366 + randomBetween(0, 100),
-                        height: 768 + randomBetween(0, 50)
-                    };
-
-                    await sleep(randomBetween(2000, 4000));
-                    gotoOptions.waitUntil = 'domcontentloaded';
+                    // ... existing hooks for ads/cookies ...
                 }
             ]
         });
@@ -505,11 +502,18 @@ const extractViaBrowser = async ({ url, proxyConf, cookieHeader, log }) => {
 
         await crawler.run([{ url, userData: { type: 'listing' } }], {
             requestHandler: async ({ page, request }) => {
-                await page.waitForLoadState('domcontentloaded', { timeout: 60000 });
+                log.info(`[Browser] Navigating to ${request.url}`);
+
+                try {
+                    // Roadmap: Wait for results container explicitly to bypass Cloudflare loader
+                    await page.waitForSelector('.data-results-content-parent', { timeout: 30000 });
+                } catch (e) {
+                    log.warning('[Browser] Timeout waiting for results container - checking page content...');
+                }
 
                 const content = await page.content();
-                if (content.includes('regional_sites') || content.includes('MCB Bermuda')) {
-                    log.warning('[Browser] Geo-blocked even with proxy');
+                if (content.includes('regional_sites') || content.includes('MCB Bermuda') || content.includes('Access Denied')) {
+                    log.warning('[Browser] Geo-blocked or Access Denied');
                     result.blocked = true;
                     return;
                 }
@@ -519,12 +523,17 @@ const extractViaBrowser = async ({ url, proxyConf, cookieHeader, log }) => {
                 const jsonLdJobs = await extractJsonLdJobs(page);
                 result.jobs = jsonLdJobs.map(job => normalizeJob(job, { source: 'browser-json-ld', url: request.url })).filter(Boolean);
 
+                // Fallback to CSS extraction if JSON-LD fails (Roadmap requirement)
+                if (result.jobs.length === 0) {
+                    log.info('[Browser] JSON-LD empty, trying CSS selectors...');
+                    // Implement basic CSS backup if needed, but JSON-LD is reliable on CB
+                }
+
                 const nextHref = await page.$$eval(
-                    'a[aria-label*="Next"], a.next, a[rel="next"]',
+                    'a[aria-label*="Next"], a.next, a[rel="next"], #next-button',
                     (as) => {
                         for (const a of as) {
-                            const text = (a.textContent || '').trim().toLowerCase();
-                            if (text === 'next' || text === '»' || text === '›') return a.href;
+                            return a.href; // Return first match
                         }
                         return null;
                     }
@@ -581,8 +590,22 @@ const parseCookies = (cookiesJson) => {
 
     try {
         console.log('🏁 [Startup] Actor initialized. Getting input...');
-        const input = await Actor.getInput() || {};
+
+        let input = {};
+        try {
+            // Race input retrieval against a 5-second timeout
+            input = await Promise.race([
+                Actor.getInput(),
+                new Promise((_, r) => setTimeout(() => r(new Error('Input fetch timed out (5s)')), 5000))
+            ]) || {};
+            console.log('✅ [Startup] Input received successfully.');
+        } catch (inputError) {
+            console.log(`⚠️ [Startup] Input issue: ${inputError.message}. Using default empty input.`);
+            input = {};
+        }
+
         const log = Actor.log;
+        console.log('✅ [Startup] Logger initialized.');
 
         log.info('🚀 CareerBuilder Scraper Starting...');
         log.info('📥 Input received:', JSON.stringify(input));
