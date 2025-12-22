@@ -5,14 +5,11 @@
   "properties": {
     "startUrls": {
       "title": "Start URLs",
-      "type": "array",
-      "description": "URLs to start scraping from (job search pages)",
-      "editor": "requestListSources",
-      "default": ["https://www.careerbuilder.com/jobs"],
-      "prefill": ["https://www.careerbuilder.com/jobs"],
-      "items": {
-        "type": "string"
-      }
+      "type": "string",
+      "description": "URLs to start scraping from (job search pages), as JSON array",
+      "editor": "textarea",
+      "default": "[\"https://www.careerbuilder.com/jobs\"]",
+      "prefill": "[\"https://www.careerbuilder.com/jobs\"]"
     },
     "searchKeywords": {
       "title": "Search Keywords",

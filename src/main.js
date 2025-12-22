@@ -218,12 +218,17 @@ router.addDefaultHandler(async ({ request, page, enqueueLinks, log }) => {
 
     // Get input schema: startUrls, maxRequestsPerCrawl, searchKeywords
     const input = await Actor.getInput();
-    const { 
-        startUrls = ['https://www.careerbuilder.com/jobs'],
+    let { 
+        startUrls = '["https://www.careerbuilder.com/jobs"]',
         maxRequestsPerCrawl = 50,
         searchKeywords = 'software engineer',
         maxConcurrency = 3 
     } = input;
+
+    // Parse startUrls if it's a string
+    if (typeof startUrls === 'string') {
+        startUrls = JSON.parse(startUrls);
+    }
 
     // Create proxy configuration (Apify Residential US proxies recommended)
     const proxyConfiguration = await Actor.createProxyConfiguration({
