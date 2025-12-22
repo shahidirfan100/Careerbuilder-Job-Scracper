@@ -216,32 +216,87 @@ router.addDefaultHandler(async ({ request, page, enqueueLinks, log }) => {
     // Initialize Apify SDK
     await Actor.init();
 
-    // Get input schema: startUrls, maxRequestsPerCrawl, searchKeywords
+    // Get input schema
     const input = await Actor.getInput();
-    let { 
-        startUrls = '["https://www.careerbuilder.com/jobs"]',
-        maxRequestsPerCrawl = 50,
-        searchKeywords = 'software engineer',
-        maxConcurrency = 3 
+    const { 
+        startUrls = 'https://www.careerbuilder.com/jobs',
+        keyword = '',
+        location = '',
+        posted_date = 'anytime',
+        radius = 50,
+        results_wanted = 100,
+        max_pages = 20,
+        cookiesJson,
+        proxyConfiguration
     } = input;
 
-    // Parse startUrls if it's a string
-    if (typeof startUrls === 'string') {
-        startUrls = JSON.parse(startUrls);
+    // Parse startUrls as newline-separated list
+    let initialUrlsToCrawl = startUrls.split('\n').map(url => url.trim()).filter(url => url);
+
+    // Build start URLs if keyword/location provided
+    if (keyword.trim() || location.trim()) {
+        const baseUrl = 'https://www.careerbuilder.com/jobs';
+        const url = new URL(baseUrl);
+        if (keyword.trim()) url.searchParams.set('keywords', keyword.trim());
+        if (location.trim()) url.searchParams.set('location', location.trim());
+        if (posted_date && posted_date !== 'anytime') {
+            const POSTED_DATE_MAP = { '24h': '1', '7d': '7', '30d': '30' };
+            if (POSTED_DATE_MAP[posted_date]) {
+                url.searchParams.set('posted', POSTED_DATE_MAP[posted_date]);
+            }
+        }
+        url.searchParams.set('cb_apply', 'false');
+        url.searchParams.set('radius', String(radius)); // Corrected variable name
+        initialUrlsToCrawl = [url.toString()];
     }
 
-    // Create proxy configuration (Apify Residential US proxies recommended)
-    const proxyConfiguration = await Actor.createProxyConfiguration({
-        groups: ['RESIDENTIAL'], // Residential proxies for CareerBuilder
+    // Normalize cookie header
+    let cookieHeader = '';
+    if (cookiesJson) {
+        const parseJSON = (maybeJson) => {
+            if (!maybeJson) return null;
+            try {
+                return typeof maybeJson === 'string' ? JSON.parse(maybeJson) : maybeJson;
+            } catch (err) {
+                log.warning(`Could not parse JSON input: ${err.message}`);
+                return null;
+            }
+        };
+        const normalizeCookieHeader = ({ cookiesJson }) => {
+            const parsed = parseJSON(cookiesJson);
+            if (!parsed) return '';
+            const parts = [];
+            if (Array.isArray(parsed)) {
+                for (const item of parsed) {
+                    if (typeof item === 'string') parts.push(item.trim());
+                    else if (item && typeof item === 'object' && item.name) {
+                        parts.push(`${item.name}=${item.value ?? ''}`);
+                    }
+                }
+            } else if (parsed && typeof parsed === 'object') {
+                for (const [k, v] of Object.entries(parsed)) parts.push(`${k}=${v ?? ''}`);
+            }
+            return parts.join('; ');
+        };
+        cookieHeader = normalizeCookieHeader({ cookiesJson });
+    }
+
+    // Create proxy configuration
+    const proxyConf = proxyConfiguration ? await Actor.createProxyConfiguration(proxyConfiguration) : await Actor.createProxyConfiguration({
+        groups: ['RESIDENTIAL'],
         checkAccess: true
     });
+
+    // Set maxRequestsPerCrawl based on results_wanted
+    const maxRequestsPerCrawl = results_wanted * 4; // Allow for retries and pagination
+    const maxConcurrency = 3; // Keep low for stealth
 
     // Launch Camoufox Firefox with stealth options
     const crawler = new PlaywrightCrawler({
         // Limit concurrency for stealth
         maxRequestsPerCrawl,
         maxConcurrency,
-        proxyConfiguration,
+        proxyConfiguration: proxyConf,
         requestHandler: router,
 
         // Camoufox + Firefox launcher with stealth fingerprint
@@ -250,14 +305,13 @@ router.addDefaultHandler(async ({ request, page, enqueueLinks, log }) => {
             launchOptions: await camoufoxLaunchOptions({
                 headless: false,  // Full browser mode to avoid headless detection
                 config: {
-                    os: 'windows',  // Spoof common OS
-                    browser: 'firefox',
+                    platform: 'Win32',  // Correct property for OS
                     locale: 'en-US',
-                    timezone: 'America/New_York',
                     screen: { width: 1920, height: 1080 },
-                    viewport: { width: 1366, height: 768 },  // Common desktop size
+                    viewport: { width: 1366, height: 768 },
                     webgl: { vendor: 'Mozilla', renderer: 'Mozilla -- Intel(R) UHD Graphics' },
-                    fonts: ['Arial', 'Helvetica', 'Times New Roman'],  // Spoof common fonts
+                    fonts: ['Arial', 'Helvetica', 'Times New Roman'],
+                    geoip: true  // Let Camoufox handle geolocation based on proxy
                 },
                 args: [
                     '--disable-blink-features=AutomationControlled',
@@ -279,7 +333,7 @@ router.addDefaultHandler(async ({ request, page, enqueueLinks, log }) => {
         // Pre-navigation stealth hooks
         preNavigationHooks: [
             async (crawlingContext, gotoOptions) => {
-                const { page } = crawlingContext;
+                const { page, session } = crawlingContext;
                 
                 // Block ads/trackers to reduce detection
                 await page.route('**/*', (route) => {
@@ -297,6 +351,34 @@ router.addDefaultHandler(async ({ request, page, enqueueLinks, log }) => {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 });
+                
+                // Set cookies if provided
+                if (cookieHeader && !session.userData?.cookiesSet) {
+                    try {
+                        const cookieHeaderToPlaywrightCookies = (headerValue) => {
+                            if (!headerValue) return [];
+                            const pairs = headerValue
+                                .split(';')
+                                .map((p) => p.trim())
+                                .filter(Boolean)
+                                .map((p) => {
+                                    const idx = p.indexOf('=');
+                                    if (idx <= 0) return null;
+                                    return { name: p.slice(0, idx).trim(), value: p.slice(idx + 1).trim() };
+                                })
+                                .filter(Boolean);
+                            return pairs.map(({ name, value }) => ({
+                                name,
+                                value,
+                                url: 'https://www.careerbuilder.com/',
+                            }));
+                        };
+                        await page.context().addCookies(cookieHeaderToPlaywrightCookies(cookieHeader));
+                        session.userData = { ...(session.userData || {}), cookiesSet: true };
+                    } catch (e) {
+                        log.debug(`Failed to set cookies: ${e.message}`);
+                    }
+                }
                 
                 // Randomize viewport slightly
                 gotoOptions.viewport = {
@@ -321,13 +403,13 @@ router.addDefaultHandler(async ({ request, page, enqueueLinks, log }) => {
     });
 
     // Add search URLs dynamically
-    const urlsToCrawl = startUrls.map(url => ({
-        url: `${url}?keywords=${encodeURIComponent(searchKeywords)}&location=USA`,
-        userData: { label: 'LIST', searchKeywords }
+    const finalUrlsToCrawl = initialUrlsToCrawl.map(url => ({
+        url,
+        userData: { label: 'LIST' }
     }));
 
-    console.log(`🚀 Starting CareerBuilder crawl with ${urlsToCrawl.length} URLs`);
-    await crawler.run(urlsToCrawl);
+    console.log(`🚀 Starting CareerBuilder crawl with ${finalUrlsToCrawl.length} URLs`);
+    await crawler.run(finalUrlsToCrawl);
 
     // Graceful exit
     await Actor.exit();

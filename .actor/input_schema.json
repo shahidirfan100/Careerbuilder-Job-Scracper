@@ -6,36 +6,67 @@
     "startUrls": {
       "title": "Start URLs",
       "type": "string",
-      "description": "URLs to start scraping from (job search pages), as JSON array",
+      "description": "URLs to start scraping from (one per line)",
       "editor": "textarea",
-      "default": "[\"https://www.careerbuilder.com/jobs\"]",
-      "prefill": "[\"https://www.careerbuilder.com/jobs\"]"
+      "default": "https://www.careerbuilder.com/jobs",
+      "prefill": "https://www.careerbuilder.com/jobs"
     },
-    "searchKeywords": {
+    "keyword": {
       "title": "Search Keywords",
       "type": "string",
-      "description": "Job search keywords (e.g., 'software engineer')",
+      "description": "Job titles or keywords (e.g., 'Software Engineer')",
       "editor": "textfield",
-      "default": "software engineer",
-      "example": "software engineer"
+      "example": "Software Engineer"
     },
-    "maxRequestsPerCrawl": {
-      "title": "Max Requests per Crawl",
+    "location": {
+      "title": "Location",
+      "type": "string",
+      "description": "City, state, or zip code (e.g., 'New York, NY')",
+      "editor": "textfield",
+      "example": "New York, NY"
+    },
+    "posted_date": {
+      "title": "Posted Date",
+      "type": "string",
+      "description": "Filter jobs by posting date",
+      "editor": "select",
+      "default": "anytime",
+      "enum": ["anytime", "24h", "7d", "30d"],
+      "enumTitles": ["Anytime", "Last 24 hours", "Last 7 days", "Last 30 days"]
+    },
+    "radius": {
+      "title": "Search Radius (miles)",
       "type": "integer",
-      "description": "Maximum number of pages to scrape",
+      "description": "Search radius in miles",
       "editor": "number",
       "default": 50,
       "minimum": 1,
-      "maximum": 1000
+      "maximum": 250
     },
-    "maxConcurrency": {
-      "title": "Max Concurrency",
+    "results_wanted": {
+      "title": "Number of Jobs",
       "type": "integer",
-      "description": "Maximum number of concurrent browser instances",
+      "description": "Maximum number of jobs to scrape",
       "editor": "number",
-      "default": 3,
+      "default": 100,
       "minimum": 1,
-      "maximum": 10
+      "maximum": 10000
+    },
+    "max_pages": {
+      "title": "Maximum Pages",
+      "type": "integer",
+      "description": "Maximum listing pages to process",
+      "editor": "number",
+      "default": 20,
+      "minimum": 1,
+      "maximum": 100
+    },
+    "cookiesJson": {
+      "title": "Cookies (JSON)",
+      "type": "string",
+      "description": "Cookies in JSON format (array or object) for bypassing blocks",
+      "editor": "textarea",
+      "example": "[{\"name\":\"sessionid\",\"value\":\"abc123\"}]"
     },
     "proxyConfiguration": {
       "title": "Proxy Configuration",
