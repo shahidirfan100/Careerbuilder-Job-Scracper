@@ -580,6 +580,11 @@ const parseCookies = (cookiesJson) => {
 
     try {
         const input = await Actor.getInput();
+        const log = Actor.log;
+
+        // Log raw input for debugging
+        log.info('📥 Raw input received:', JSON.stringify(input));
+
         const {
             startUrls = 'https://www.careerbuilder.com/jobs',
             keyword = '',
@@ -593,10 +598,9 @@ const parseCookies = (cookiesJson) => {
             extractionMethod = 'auto'
         } = input || {};
 
-        const log = Actor.log;
-
         log.info('🚀 CareerBuilder Scraper - 3-Tier Extraction with Camoufox Stealth');
         log.info(`📊 Target: ${results_wanted} jobs, Max pages: ${max_pages}`);
+        log.info(`🔧 Extraction method: ${extractionMethod}`);
 
         // Build URLs
         let urlsToCrawl = [];
@@ -605,8 +609,21 @@ const parseCookies = (cookiesJson) => {
             urlsToCrawl = [searchUrl];
             log.info(`🔍 Search: ${searchUrl}`);
         } else {
-            urlsToCrawl = startUrls.split('\n').map(u => u.trim()).filter(Boolean);
-            log.info(`📋 URLs: ${urlsToCrawl.length}`);
+            // Handle both string and array inputs
+            if (typeof startUrls === 'string') {
+                urlsToCrawl = startUrls.split('\n').map(u => u.trim()).filter(Boolean);
+            } else if (Array.isArray(startUrls)) {
+                urlsToCrawl = startUrls.map(item => {
+                    return typeof item === 'string' ? item : (item.url || '');
+                }).filter(Boolean);
+            } else {
+                urlsToCrawl = ['https://www.careerbuilder.com/jobs'];
+            }
+            log.info(`📋 URLs: ${urlsToCrawl.length} - ${urlsToCrawl[0]}`);
+        }
+
+        if (urlsToCrawl.length === 0) {
+            throw new Error('No URLs to crawl! Please provide startUrls or keyword+location.');
         }
 
         // Create USA residential proxy (REQUIRED for geo-blocking)
