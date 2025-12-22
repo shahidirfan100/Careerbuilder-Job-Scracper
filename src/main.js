@@ -576,17 +576,19 @@ const parseCookies = (cookiesJson) => {
 };
 
 (async () => {
+    console.log('🏁 [Startup] Node process started. Initializing Actor...');
     await Actor.init();
 
     try {
+        console.log('🏁 [Startup] Actor initialized. Getting input...');
         const input = await Actor.getInput() || {};
         const log = Actor.log;
 
         log.info('🚀 CareerBuilder Scraper Starting...');
         log.info('📥 Input received:', JSON.stringify(input));
 
-        // Parse input with defaults - HARDCODED TEST KEYWORD FOR DEBUGGING
-        const keyword = input.keyword || 'admin';  // Default to 'admin' for testing
+        // Parse input with defaults
+        const keyword = input.keyword || '';
         const location = input.location || '';
         const startUrls = input.startUrls || 'https://www.careerbuilder.com/jobs';
         const posted_date = input.posted_date || 'anytime';
@@ -602,21 +604,35 @@ const parseCookies = (cookiesJson) => {
         log.info(`📊 Config: keyword="${keyword}", location="${location}"`);
         log.info(`📊 Target: ${results_wanted} jobs, Max pages: ${max_pages}`);
 
-        // Build URLs
+        // Build URLs logic - Prioritize Start URLs if they are NOT the default
         let urlsToCrawl = [];
-        if (keyword.trim() || location.trim()) {
+        const defaultStartUrl = 'https://www.careerbuilder.com/jobs';
+
+        // Parse startUrls regardless of format
+        let parsedStartUrls = [];
+        if (typeof startUrls === 'string') {
+            parsedStartUrls = startUrls.split('\n').map(u => u.trim()).filter(Boolean);
+        } else if (Array.isArray(startUrls)) {
+            parsedStartUrls = startUrls.map(item => typeof item === 'string' ? item : (item.url || '')).filter(Boolean);
+        }
+
+        // Filter out the "default" placeholder URL if it's the only one
+        const customStartUrls = parsedStartUrls.filter(u => u !== defaultStartUrl);
+
+        if (customStartUrls.length > 0) {
+            // Case 1: User provided specific URLs (e.g. pasted a search link)
+            urlsToCrawl = customStartUrls;
+            log.info(`📋 Using ${urlsToCrawl.length} provided Start URLs (ignoring keyword/location)`);
+        } else if (keyword.trim() || location.trim()) {
+            // Case 2: User provided Keyword/Location
             const searchUrl = buildSearchUrl({ keyword, location, posted_date, radius });
             urlsToCrawl = [searchUrl];
-            log.info(`🔍 Search URL: ${searchUrl}`);
+            log.info(`� Built Search URL from keyword/location: ${searchUrl}`);
         } else {
-            if (typeof startUrls === 'string') {
-                urlsToCrawl = startUrls.split('\n').map(u => u.trim()).filter(Boolean);
-            } else if (Array.isArray(startUrls)) {
-                urlsToCrawl = startUrls.map(item => typeof item === 'string' ? item : (item.url || '')).filter(Boolean);
-            } else {
-                urlsToCrawl = ['https://www.careerbuilder.com/jobs'];
-            }
-            log.info(`📋 Using URLs: ${urlsToCrawl.length}`);
+            // Case 3: Fallback (Nothing provided) -> Verify safe default
+            log.warning('⚠️ No specific input provided. Running default test: "admin"');
+            const searchUrl = buildSearchUrl({ keyword: 'admin', location: '', posted_date, radius });
+            urlsToCrawl = [searchUrl];
         }
 
         if (urlsToCrawl.length === 0) {
@@ -660,11 +676,18 @@ const parseCookies = (cookiesJson) => {
             while (currentUrl && currentPage <= max_pages && totalSaved < results_wanted) {
                 log.info(`\n📄 Page ${currentPage}: ${currentUrl}`);
 
+                if (!proxyConf) {
+                    log.error('❌ Aborting: No valid proxy configuration available.');
+                    await Actor.exit({ exitCode: 1 });
+                    return;
+                }
+
                 const proxyUrl = await proxyConf.newUrl();
                 let extractionResult = { success: false, jobs: [], nextPageUrl: null };
 
                 // TIER 1: API
                 if (extractionMethod === 'auto' || extractionMethod === 'api') {
+                    console.log('🔹 [Tier 1] Starting API extraction...'); // Backup log
                     log.info('🔹 Tier 1: API');
                     extractionResult = await extractViaAPI({
                         keyword, location, posted_date, radius,

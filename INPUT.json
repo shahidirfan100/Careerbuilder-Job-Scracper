@@ -1,9 +1,7 @@
 {
-    "startUrls": "https://www.careerbuilder.com/jobs",
-    "keyword": "admin",
+    "startUrls": "https://www.careerbuilder.com/jobs?posted=1&radius=50&cb_apply=false&keywords=Finance",
+    "keyword": "",
     "location": "",
-    "posted_date": "anytime",
-    "radius": 50,
     "results_wanted": 20,
     "max_pages": 10,
     "proxyConfiguration": {
