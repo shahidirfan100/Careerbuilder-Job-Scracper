@@ -1,41 +1,105 @@
 # CareerBuilder Job Scraper
 
-Fast, production-ready Apify actor that pulls CareerBuilder jobs using an API-first strategy with HTML/JSON-LD fallback for resilience. Designed to run through Apify Residential proxies with optional cookies to stay stealthy and reduce blocking.
+Production-ready Apify actor that scrapes CareerBuilder.com jobs using a **3-tier extraction strategy** for maximum speed, reliability, and stealth.
 
-## How it works
-- Tries CareerBuilder JSON search endpoints first (HTTP call + JSON parse) using built-in candidates.
-- If API results are insufficient, falls back to HTML/JSON-LD parsing of listing and detail pages.
-- If HTML gets blocked (403/Cloudflare), automatically falls back to a Playwright browser crawl.
-- Deduplicates by job id/url, cleans descriptions (HTML + text), and stops once `results_wanted` is reached or `max_pages` is hit.
+## 🚀 How It Works
 
-## Inputs (key fields)
-- `startUrl` (string, optional): Direct search URL from your browser. Recommended for best relevancy.
-- `keyword` / `location` / `posted_date`: Build the search when `startUrl` is empty. `posted_date`: `anytime | 24h | 7d | 30d`.
-- `results_wanted` (int): Max jobs to collect (default 100).
-- `max_pages` (int): Max listing pages to visit in HTML fallback (default 20).
-- `cookies` or `cookiesJson`: Optional cookies to bypass blocks.
-- `proxyConfiguration`: Use Apify Residential proxy; datacenter is frequently blocked.
+The actor automatically tries extraction methods in order of efficiency:
 
-## Output fields
-Each dataset item:
-- `title`, `company`, `location`, `date_posted`, `salary`, `job_type`
+1. **Tier 1 - JSON API** (Fastest ⚡)
+   - Tries GraphQL endpoint at `/graphql`
+   - Falls back to REST API if available
+   - ~100ms per request
+   - No browser overhead
+
+2. **Tier 2 - HTML Parsing** (Fast 🔄)
+   - Uses `got-scraping` with stealth headers
+   - Extracts JSON-LD structured data
+   - Cheerio HTML parsing as fallback
+   - ~200ms per request
+
+3. **Tier 3 - Browser (Camoufox)** (Stealth 🛡️)
+   - Full Playwright + Camoufox browser
+   - Bypasses Cloudflare & anti-bot systems
+   - USA residential proxy required
+   - ~5-10s per request (last resort only)
+
+Each tier automatically falls back to the next if blocked or unsuccessful.
+
+## 🌍 Important: Geographic Restrictions
+
+CareerBuilder uses **geo-blocking** (MCB Bermuda Ltd) and requires:
+- ✅ **USA Residential Proxy** (configured by default)
+- ✅ Proper stealth headers and fingerprinting
+- ❌ NOT accessible from outside supported regions
+
+## 📥 Inputs
+
+### Required
+- **Start URLs** or **Keyword + Location**: Build search or paste direct URL
+
+### Search Parameters
+- `keyword` (string): Job title/keywords (e.g., "Software Engineer")
+- `location` (string): City, state, or zip (e.g., "New York, NY")
+- `posted_date` (enum): `anytime` | `24h` | `7d` | `30d`
+- `radius` (int): Search radius in miles (default: 50)
+
+### Extraction Control
+- `results_wanted` (int): Max jobs to scrape (default: 20)
+- `max_pages` (int): Max listing pages (default: 10)
+- `extractionMethod` (enum): 
+  - `auto` ⭐ Recommended - tries all tiers
+  - `api` - API only (fastest)
+  - `html` - HTML parsing only
+  - `browser` - Browser only (slowest)
+
+### Advanced
+- `cookiesJson` (JSON): Optional cookies for bypass
+- `proxyConfiguration` (object): **REQUIRED** - USA RESIDENTIAL proxy
+
+## 📤 Output Fields
+
+Each job contains:
+- `title`, `company`, `location`, `date_posted`
+- `salary`, `job_type`
 - `description_html`, `description_text`
-- `url`, `scraped_at`, `source` (`api`, `json-ld-list`, `json-ld-detail`, `html-detail`, etc.)
-- `raw` (only on API results) for debugging payload mappings
+- `url`, `scraped_at`
+- `source` (e.g., `api-graphql`, `html-json-ld`, `browser-detail`)
+- `raw` (API responses only, for debugging)
 
-## Usage tips
-- Prefer providing `startUrl` copied from your browser search.
-- Always run with Residential proxy; add browser cookies if you see blocking.
-- Start with smaller `results_wanted` to validate, then scale.
+## 💡 Usage Tips
 
-## Troubleshooting
-- **0 jobs**: Enable RESIDENTIAL proxy, add cookies, and re-run.
-- **Blocked/403**: Rotate sessions (re-run), reduce concurrency (already low), provide fresh cookies.
+1. **Always use RESIDENTIAL proxy with countryCode: "US"** (default)
+2. Start with `extractionMethod: "auto"` for best results
+3. Lower `results_wanted` for testing (default 20)
+4. Provide `cookiesJson` if you encounter persistent blocking
+5. Check logs to see which extraction tier succeeded
 
-## Running locally
+## 🔧 Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| **0 jobs extracted** | Check proxy is set to RESIDENTIAL + USA |
+| **Geo-blocking errors** | Verify proxy country code is "US" |
+| **403 / Cloudflare** | Try adding cookies from a real browser session |
+| **All tiers failing** | Site may be down or structure changed |
+
+## 🏃 Running Locally
+
 ```bash
 npm install
-APIFY_PROXY_PASSWORD=YOUR_TOKEN npm start
+APIFY_PROXY_PASSWORD=your_token npm start
 ```
 
-> Respect CareerBuilder's terms of service. Use responsibly.
+## 📊 Performance Benchmarks
+
+| Method | Speed | Cost | Success Rate |
+|--------|-------|------|--------------|
+| API | ⚡⚡⚡ Fast | 💰 Cheap | High (if available) |
+| HTML | ⚡⚡ Medium | 💰💰 Low | High |
+| Browser | ⚡ Slow | 💰💰💰 High | Very High |
+
+## ⚖️ Legal Notice
+
+Respect CareerBuilder's Terms of Service. This tool is for educational and authorized use only. Always verify you have permission to scrape target websites.
+
